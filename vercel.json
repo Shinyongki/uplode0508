@@ -18,6 +18,7 @@
   "env": {
     "USE_SERVICE_ACCOUNT": "true",
     "SERVICE_ACCOUNT_KEY_PATH": "./service-account.json",
-    "NODE_ENV": "production"
+    "NODE_ENV": "production",
+    "NODE_OPTIONS": "--openssl-legacy-provider"
   }
 }
