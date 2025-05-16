@@ -128,6 +128,71 @@ npm start
 
 **참고**: 로컬 개발에서 사용한 `PORT` 환경 변수는 Vercel에서 무시됩니다. Vercel은 자체적으로 포트를 관리합니다.
 
+## Vercel 배포 가이드
+
+### 환경 변수 설정
+
+Vercel에 배포 시 다음 환경 변수를 설정해야 합니다:
+
+1. **필수 환경 변수**
+   - `SPREADSHEET_ID`: Google 스프레드시트 ID
+   - `USE_SERVICE_ACCOUNT`: 서비스 계정 사용 여부 (true/false)
+   - `NODE_ENV`: 환경 설정 (production)
+
+2. **서비스 계정 인증 방법 (두 가지 중 하나 선택)**
+   
+   **방법 1: 환경 변수로 서비스 계정 정보 설정 (권장)**
+   - `SERVICE_ACCOUNT_CLIENT_EMAIL`: 서비스 계정 이메일
+   - `SERVICE_ACCOUNT_PRIVATE_KEY`: 서비스 계정 개인 키 (개행문자 \n 포함)
+   
+   **방법 2: 서비스 계정 키 파일 사용**
+   - 저장소에 service-account.json 파일 포함
+   - `SERVICE_ACCOUNT_KEY_PATH`: 서비스 계정 키 파일 경로 (기본값: './service-account.json')
+
+3. **캐싱 및 동기화 설정 (선택 사항)**
+   - `AUTO_SYNC`: 서버 시작 시 자동 동기화 활성화 (true/false, 기본값: false)
+   - `SYNC_INTERVAL`: 동기화 간격(초) (기본값: 900 = 15분)
+   - `CACHE_TTL`: 캐시 유효 시간(초) (기본값: 86400 = 24시간)
+
+### 서비스 계정 권한 설정
+
+1. Google Cloud Console에서 서비스 계정 생성
+2. Google Sheets API 활성화
+3. 서비스 계정에 스프레드시트 접근 권한 부여 (스프레드시트에서 서비스 계정 이메일로 공유 설정)
+
+### 데이터 캐싱 및 동기화
+
+이 시스템은 Google Sheets API 장애 시에도 서비스를 안정적으로 제공하기 위해 다단계 데이터 제공 전략을 사용합니다:
+
+1. **실시간 데이터**: 정상적인 상황에서는 Google Sheets에서 실시간 데이터를 가져옵니다.
+2. **캐시된 데이터**: API 장애 발생 시 이전에 성공적으로 가져온 데이터를 캐시에서 제공합니다.
+3. **정적 Fallback 데이터**: 캐시된 데이터도 없는 경우 마지막 수단으로 기본 데이터를 제공합니다.
+
+이 구조는 다음과 같은 이점을 제공합니다:
+- **서비스 안정성**: Google API 장애 시에도 기본 기능 유지
+- **데이터 최신성**: 가능한 최신 데이터를 제공하기 위한 단계적 접근
+- **사용자 인식**: fallback 데이터 사용 시 사용자에게 알림 제공
+
+### 관리자 엔드포인트
+
+다음 엔드포인트를 통해 데이터 동기화 및 캐시를 관리할 수 있습니다:
+
+- **동기화 상태 확인**: `/api/sync/status` (GET)
+- **수동 동기화 실행**: `/api/sync/run` (POST)
+- **주기적 동기화 시작**: `/api/sync/start` (POST, 선택적 파라미터: `interval`)
+- **주기적 동기화 중지**: `/api/sync/stop` (POST)
+- **캐시 상태 확인**: `/api/cache/status` (GET)
+- **캐시 초기화**: `/api/cache/clear` (POST, 선택적 파라미터: `key`)
+
+### 디버깅
+
+배포 후 문제가 발생하면 다음 엔드포인트로 디버깅할 수 있습니다:
+
+- `/debug-env`: 환경 변수 및 설정 확인
+- `/api/service-account-status`: 서비스 계정 인증 상태 확인
+
+문제 해결이 되지 않는 경우, fallback 데이터가 자동으로 사용됩니다.
+
 ## Google API 설정
 
 1. [Google Cloud Console](https://console.cloud.google.com/)에서 프로젝트를 생성합니다.
