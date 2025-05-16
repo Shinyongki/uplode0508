@@ -6,6 +6,12 @@ const cors = require('cors');
 const session = require('express-session');
 const morgan = require('morgan');
 
+// 환경 변수 로깅
+console.log('NODE_VERSION:', process.version);
+console.log('USE_SERVICE_ACCOUNT:', process.env.USE_SERVICE_ACCOUNT);
+console.log('SERVICE_ACCOUNT_KEY_PATH exists:', process.env.SERVICE_ACCOUNT_KEY_PATH);
+console.log('SPREADSHEET_ID exists:', !!process.env.SPREADSHEET_ID);
+
 // 라우트 가져오기 - 서버 파일과 상대 경로가 달라지므로 경로 조정
 const apiRoutes = require('../routes/api');
 const authRoutes = require('../routes/auth');
@@ -28,6 +34,17 @@ app.use(session({
 app.use('/api', apiRoutes);
 app.use('/auth', authRoutes);
 
+// 디버그 엔드포인트 추가
+app.get('/debug-env', (req, res) => {
+  res.status(200).json({
+    nodeVersion: process.version,
+    useServiceAccount: process.env.USE_SERVICE_ACCOUNT,
+    serviceAccountKeyPath: process.env.SERVICE_ACCOUNT_KEY_PATH,
+    spreadsheetIdExists: !!process.env.SPREADSHEET_ID,
+    env: process.env.NODE_ENV
+  });
+});
+
 // 기본 라우트
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, '../public', 'index.html'));
@@ -35,11 +52,14 @@ app.get('/', (req, res) => {
 
 // 오류 처리 미들웨어
 app.use((err, req, res, next) => {
+  console.error('ERROR:', err.message);
   console.error(err.stack);
+  
   res.status(500).json({
     status: 'error',
     message: '서버 오류가 발생했습니다.',
-    error: process.env.NODE_ENV === 'development' ? err.message : {}
+    error: err.message,
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
   });
 });
 
