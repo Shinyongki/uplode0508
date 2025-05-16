@@ -27,12 +27,29 @@ function getServiceAccountFromEnv() {
       return null;
     }
     
-    // 개행 문자 처리
-    const formattedPrivateKey = privateKey.replace(/\\n/g, '\n');
+    // 개행 문자 처리 - 다양한 형식 지원
+    let formattedPrivateKey = privateKey;
+    
+    // Vercel 환경에서는 JSON 문자열이 이스케이프되는 경우가 있어 추가 처리
+    if (privateKey.includes('\\n')) {
+      formattedPrivateKey = privateKey.replace(/\\n/g, '\n');
+    }
+    
+    // 키가 따옴표로 감싸져 있는 경우 처리
+    if (formattedPrivateKey.startsWith('"') && formattedPrivateKey.endsWith('"')) {
+      formattedPrivateKey = formattedPrivateKey.slice(1, -1);
+    }
+    
+    console.log('[sheets-helper] Successfully parsed service account from environment variables');
     
     return {
       client_email: clientEmail,
-      private_key: formattedPrivateKey
+      private_key: formattedPrivateKey,
+      // 서비스 계정 키의 다른 필드들은 인증에 필요 없으므로 생략
+      // 다만 필요한 경우 아래 필드들을 추가할 수 있음
+      type: "service_account",
+      project_id: process.env.SERVICE_ACCOUNT_PROJECT_ID || "uplode0508",
+      private_key_id: process.env.SERVICE_ACCOUNT_PRIVATE_KEY_ID || ""
     };
   } catch (error) {
     console.error('[sheets-helper] Error parsing service account from env:', error.message);
