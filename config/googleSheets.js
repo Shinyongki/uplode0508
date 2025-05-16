@@ -11,18 +11,38 @@ const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 // 환경변수로 서비스 계정 사용 여부 및 키 파일 경로 설정
 const USE_SERVICE_ACCOUNT = process.env.USE_SERVICE_ACCOUNT === 'true';
 const SERVICE_ACCOUNT_KEY_PATH = process.env.SERVICE_ACCOUNT_KEY_PATH || path.join(__dirname, '..', 'service-account.json');
+const SERVICE_ACCOUNT_PRIVATE_KEY = process.env.SERVICE_ACCOUNT_PRIVATE_KEY;
+const SERVICE_ACCOUNT_CLIENT_EMAIL = process.env.SERVICE_ACCOUNT_CLIENT_EMAIL;
 
 // OAuth2 클라이언트 생성
 const getAuthClient = () => {
   if (USE_SERVICE_ACCOUNT) {
-    // 서비스 계정 키 파일로 JWT 클라이언트 생성
-    const key = JSON.parse(fs.readFileSync(SERVICE_ACCOUNT_KEY_PATH, 'utf8'));
-    return new google.auth.JWT(
-      key.client_email,
-      null,
-      key.private_key,
-      SCOPES
-    );
+    // 환경 변수에서 서비스 계정 정보를 사용하는 경우
+    if (SERVICE_ACCOUNT_PRIVATE_KEY && SERVICE_ACCOUNT_CLIENT_EMAIL) {
+      console.log('환경 변수에서 서비스 계정 정보 사용');
+      
+      // 비공개 키에서 \\n을 실제 줄바꿈으로 변환 (Vercel 환경변수 이슈 대응)
+      const privateKey = SERVICE_ACCOUNT_PRIVATE_KEY.replace(/\\n/g, '\n');
+      
+      return new google.auth.JWT(
+        SERVICE_ACCOUNT_CLIENT_EMAIL,
+        null,
+        privateKey,
+        SCOPES
+      );
+    } 
+    // 파일에서 서비스 계정 정보를 읽는 경우
+    else {
+      console.log('서비스 계정 키 파일에서 정보 읽기');
+      // 서비스 계정 키 파일로 JWT 클라이언트 생성
+      const key = JSON.parse(fs.readFileSync(SERVICE_ACCOUNT_KEY_PATH, 'utf8'));
+      return new google.auth.JWT(
+        key.client_email,
+        null,
+        key.private_key,
+        SCOPES
+      );
+    }
   }
   // 기존 OAuth2 사용자 인증 방식
   const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));

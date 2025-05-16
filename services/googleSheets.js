@@ -5,6 +5,8 @@ const { google } = require('googleapis');
 // 서비스 계정 환경변수 지원
 const USE_SERVICE_ACCOUNT = process.env.USE_SERVICE_ACCOUNT === 'true';
 const SERVICE_ACCOUNT_KEY_PATH = process.env.SERVICE_ACCOUNT_KEY_PATH || path.join(__dirname, '..', 'service-account.json');
+const SERVICE_ACCOUNT_PRIVATE_KEY = process.env.SERVICE_ACCOUNT_PRIVATE_KEY;
+const SERVICE_ACCOUNT_CLIENT_EMAIL = process.env.SERVICE_ACCOUNT_CLIENT_EMAIL;
 
 // 파일 경로 설정
 const TOKEN_PATH = path.join(__dirname, '..', 'token.json');
@@ -14,16 +16,39 @@ const CREDENTIALS_PATH = path.join(__dirname, '..', 'credentials.json');
 async function getAuthClient() {
   // Debug: show service account branch and key path
   console.log('USE_SERVICE_ACCOUNT:', USE_SERVICE_ACCOUNT);
-  console.log('SERVICE_ACCOUNT_KEY_PATH:', SERVICE_ACCOUNT_KEY_PATH);
+  
   if (USE_SERVICE_ACCOUNT) {
-    // 서비스 계정 키로 JWT 클라이언트 생성
-    const key = JSON.parse(fs.readFileSync(SERVICE_ACCOUNT_KEY_PATH, 'utf8'));
-    return new google.auth.JWT(
-      key.client_email,
-      null,
-      key.private_key,
-      ['https://www.googleapis.com/auth/spreadsheets']
-    );
+    try {
+      // 환경 변수에서 서비스 계정 정보를 사용하는 경우
+      if (SERVICE_ACCOUNT_PRIVATE_KEY && SERVICE_ACCOUNT_CLIENT_EMAIL) {
+        console.log('환경 변수에서 서비스 계정 정보 사용');
+        
+        // 비공개 키에서 \\n을 실제 줄바꿈으로 변환 (Vercel 환경변수 이슈 대응)
+        const privateKey = SERVICE_ACCOUNT_PRIVATE_KEY.replace(/\\n/g, '\n');
+        
+        return new google.auth.JWT(
+          SERVICE_ACCOUNT_CLIENT_EMAIL,
+          null,
+          privateKey,
+          ['https://www.googleapis.com/auth/spreadsheets']
+        );
+      } 
+      // 파일에서 서비스 계정 정보를 읽는 경우
+      else {
+        console.log('SERVICE_ACCOUNT_KEY_PATH:', SERVICE_ACCOUNT_KEY_PATH);
+        console.log('서비스 계정 키 파일에서 정보 읽기');
+        const key = JSON.parse(fs.readFileSync(SERVICE_ACCOUNT_KEY_PATH, 'utf8'));
+        return new google.auth.JWT(
+          key.client_email,
+          null,
+          key.private_key,
+          ['https://www.googleapis.com/auth/spreadsheets']
+        );
+      }
+    } catch (error) {
+      console.error('서비스 계정 인증 생성 오류:', error);
+      throw error;
+    }
   }
   try {
     console.log('인증 클라이언트 생성 시작');
