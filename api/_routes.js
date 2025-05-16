@@ -5,9 +5,11 @@ const router = express.Router();
 // API 엔드포인트들 가져오기
 const committeesHandler = require('./committees');
 const committeesAllHandler = require('./committees-all');
+const committeesMatchingHandler = require('./committees-matching');
 const organizationsHandler = require('./organizations');
 const schedulesHandler = require('./schedules');
 const debugEnvHandler = require('./debug-env');
+const resultsMeHandler = require('./results-me');
 
 // 캐싱 및 동기화 모듈
 const cacheManager = require('./cache-manager');
@@ -16,6 +18,8 @@ const dataSync = require('./data-sync');
 // 각 라우트 등록
 router.get('/committees', committeesHandler);
 router.get('/committees/all', committeesAllHandler);
+router.get('/committees-matching', committeesMatchingHandler);
+router.get('/results-me', resultsMeHandler);
 router.get('/organizations', organizationsHandler);
 router.get('/schedules', schedulesHandler);
 router.get('/debug-env', debugEnvHandler);
