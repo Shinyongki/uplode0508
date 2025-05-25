@@ -72,11 +72,8 @@ const committeeOrgData = [
 app.get('/api/sheets/organizations', (req, res) => {
   try {
     console.log('위원별 담당기관 API 호출됨');
-    // 클라이언트가 기대하는 형식으로 데이터 반환
-    res.status(200).json({
-      status: 'success',
-      values: committeeOrgData
-    });
+    // 클라이언트가 기대하는 형식으로 데이터 반환 - 배열 직접 반환
+    res.status(200).json(committeeOrgData);
   } catch (error) {
     console.error('위원별 담당기관 API 오류:', error);
     res.status(500).json({
@@ -107,11 +104,8 @@ app.get('/api/committees/matching', (req, res) => {
       };
     });
     
-    // 클라이언트가 기대하는 형식으로 데이터 반환
-    res.status(200).json({
-      status: 'success',
-      matchings: matchings // 직접 matchings 배열 반환
-    });
+    // 클라이언트가 기대하는 형식으로 데이터 반환 - 배열 직접 반환
+    res.status(200).json(matchings);
   } catch (error) {
     console.error('위원별 담당기관 매칭 API 오류:', error);
     res.status(500).json({
@@ -149,11 +143,8 @@ app.get('/api/organizations', (req, res) => {
       }
     }
     
-    // 클라이언트가 기대하는 형식으로 데이터 반환
-    res.status(200).json({
-      status: 'success',
-      organizations: uniqueOrgs // 직접 organizations 배열 반환
-    });
+    // 클라이언트가 기대하는 형식으로 데이터 반환 - 배열 직접 반환
+    res.status(200).json(uniqueOrgs);
   } catch (error) {
     console.error('기관 목록 API 오류:', error);
     res.status(500).json({
