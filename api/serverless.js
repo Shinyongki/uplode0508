@@ -143,8 +143,14 @@ app.get('/api/organizations', (req, res) => {
       }
     }
     
-    // 클라이언트가 기대하는 형식으로 데이터 반환 - 배열 직접 반환
-    res.status(200).json(uniqueOrgs);
+    // 클라이언트가 기대하는 형식으로 데이터 반환 - 클라이언트 코드와 호환을 위해 객체 형태로 반환
+    res.status(200).json({
+      status: 'success',
+      organizations: {
+        main: uniqueOrgs,
+        sub: []
+      }
+    });
   } catch (error) {
     console.error('기관 목록 API 오류:', error);
     res.status(500).json({
