@@ -27,26 +27,43 @@ let sheets;
 try {
   // 환경 변수에서 서비스 계정 키를 가져와 파일로 저장 (Vercel 환경용)
   if (process.env.SERVICE_ACCOUNT_KEY) {
-    console.log('환경 변수에서 서비스 계정 키를 가져옵니다.');
-    const serviceAccountPath = path.join(__dirname, 'service-account.json');
-    fs.writeFileSync(serviceAccountPath, process.env.SERVICE_ACCOUNT_KEY);
-    process.env.SERVICE_ACCOUNT_KEY_PATH = serviceAccountPath;
-    console.log('서비스 계정 키 파일이 생성되었습니다:', serviceAccountPath);
+    try {
+      console.log('환경 변수에서 서비스 계정 키를 가져옵니다.');
+      const serviceAccountPath = path.join(__dirname, 'service-account.json');
+      fs.writeFileSync(serviceAccountPath, process.env.SERVICE_ACCOUNT_KEY);
+      process.env.SERVICE_ACCOUNT_KEY_PATH = serviceAccountPath;
+      console.log('서비스 계정 키 파일이 생성되었습니다:', serviceAccountPath);
+    } catch (writeError) {
+      console.error('서비스 계정 키 파일 저장 중 오류:', writeError);
+      // 파일 저장 실패 시 기본 값 설정
+      process.env.SERVICE_ACCOUNT_KEY_PATH = './service-account.json';
+    }
   } else {
     console.log('환경 변수에 서비스 계정 키가 없습니다. 파일 시스템에서 찾습니다.');
   }
 
-  // 구글시트 인증 설정
-  authGoogle = new google.auth.GoogleAuth({
-    keyFile: path.join(__dirname, 'service-account.json'),
-    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-  });
+  // 서비스 계정 키 파일 존재 확인
+  const keyFilePath = path.join(__dirname, 'service-account.json');
+  const keyFileExists = fs.existsSync(keyFilePath);
+  console.log(`서비스 계정 키 파일 존재 여부: ${keyFileExists}`);
 
-  // 구글시트 API 클라이언트 생성
-  sheets = google.sheets({ version: 'v4', auth: authGoogle });
-  console.log('Google Sheets API 클라이언트가 성공적으로 초기화되었습니다.');
+  try {
+    // 구글시트 인증 설정
+    authGoogle = new google.auth.GoogleAuth({
+      keyFile: path.join(__dirname, 'service-account.json'),
+      scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+    });
+
+    // 구글시트 API 클라이언트 생성
+    sheets = google.sheets({ version: 'v4', auth: authGoogle });
+    console.log('Google Sheets API 클라이언트가 성공적으로 초기화되었습니다.');
+  } catch (authError) {
+    console.error('Google Sheets API 인증 중 오류 발생:', authError);
+    // 인증 실패에도 서버 실행 계속
+  }
 } catch (error) {
   console.error('Google Sheets API 초기화 중 오류 발생:', error);
+  // 초기화 오류에도 서버 실행 계속
 }
 
 // 기본 미들웨어 설정
@@ -244,32 +261,66 @@ app.use((req, res, next) => {
   });
 });
 
-// 오류 처리 미들웨어
+// 에러 처리 미들웨어
 app.use((err, req, res, next) => {
-  console.error('서버 오류:', err);
-  console.error(err.stack);
-  res.status(500).json({
-    status: 'error',
-    message: '서버 오류가 발생했습니다.',
-    error: process.env.NODE_ENV === 'development' ? err.message : {}
+  console.error('Server error:', err.stack);
+  res.status(500).json({ 
+    error: 'Internal server error', 
+    message: err.message,
+    path: req.path,
+    method: req.method,
+    timestamp: new Date().toISOString()
   });
 });
 
-// 서버 시작
-const startServer = (port) => {
-  const server = app.listen(port)
-    .on('error', (err) => {
-      if (err.code === 'EADDRINUSE') {
-        console.warn(`포트 ${port}가 이미 사용 중입니다. 다른 포트(${port + 1})로 시도합니다.`);
-        startServer(port + 1);
-      } else {
-        console.error('서버 시작 오류:', err);
-      }
-    })
-    .on('listening', () => {
-      console.log(`서버가 http://localhost:${port} 에서 실행 중입니다.`);
-    });
-};
+// Vercel 환경에서 사용할 기본 라우트 추가
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV,
+    googleSheetsInitialized: !!sheets
+  });
+});
 
-// 초기 포트로 서버 시작 시도
-startServer(PORT); 
+// Vercel 환경에서는 서버를 시작하지 않음
+if (process.env.NODE_ENV !== 'production') {
+  // 로컬 환경에서만 서버 시작
+  const startServer = (port) => {
+    const server = app.listen(port)
+      .on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+          console.log(`Port ${port} is in use, trying ${port + 1}`);
+          startServer(port + 1);
+        } else {
+          console.error('Server error:', err);
+        }
+      })
+      .on('listening', () => {
+        console.log(`Server started on port ${port}`);
+      });
+    
+    return server;
+  };
+
+  // 초기 포트로 서버 시작
+  startServer(PORT);
+  
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  
+  // 서버 정보 출력
+  console.log('Server configuration:');
+  console.log(`- Port: ${PORT}`);
+  console.log(`- Google Sheets API: ${process.env.USE_SERVICE_ACCOUNT === 'true' ? 'Enabled' : 'Disabled'}`);
+  console.log(`- Session Secret: ${process.env.SESSION_SECRET ? 'Configured' : 'Not configured'}`);
+  console.log(`- JWT Secret: ${process.env.JWT_SECRET ? 'Configured' : 'Not configured'}`);
+} else {
+  // Vercel 환경에서는 정보만 출력
+  console.log(`Vercel serverless function initialized`);
+  console.log(`Environment: ${process.env.NODE_ENV}`);
+  console.log(`Google Sheets API: ${process.env.USE_SERVICE_ACCOUNT === 'true' ? 'Enabled' : 'Disabled'}`);
+}
+
+// Vercel 환경에서 사용할 모듈 내보내기
+module.exports = app;

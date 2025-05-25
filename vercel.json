@@ -2,7 +2,7 @@
   "version": 2,
   "builds": [
     { 
-      "src": "api/index.js", 
+      "src": "server.js", 
       "use": "@vercel/node",
       "config": {
         "nodeVersion": "18.x"
@@ -11,13 +11,12 @@
     { "src": "public/**/*", "use": "@vercel/static" }
   ],
   "routes": [
-    { "src": "/api/(.*)", "dest": "api/index.js" },
-    { "src": "/auth/(.*)", "dest": "api/index.js" },
-    { "src": "/(.*)", "dest": "api/index.js" }
+    { "src": "/api/(.*)", "dest": "server.js" },
+    { "src": "/auth/(.*)", "dest": "server.js" },
+    { "src": "/(.*)", "dest": "server.js" }
   ],
   "env": {
     "USE_SERVICE_ACCOUNT": "true",
-    "SERVICE_ACCOUNT_KEY_PATH": "./service-account.json",
     "NODE_ENV": "production",
     "NODE_OPTIONS": "--openssl-legacy-provider"
   }

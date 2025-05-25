@@ -311,7 +311,14 @@ async function readSheetData(spreadsheetId, range) {
       return getFallbackCommitteeOrgData();
     }
     
-    throw error;
+    try {
+      // 만약 시트 데이터 조회에 실패하면 빈 배열 반환
+      console.log(`[sheets-helper] Returning empty array as fallback for ${sheetName}`);
+      return [];
+    } catch (fallbackError) {
+      console.error('[sheets-helper] Error in fallback handling:', fallbackError.message);
+      throw error;
+    }
   }
 }
 
