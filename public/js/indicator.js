@@ -10,6 +10,21 @@ let selectedIndicator = null;
 let cachedResults = {};  // 기관별 모든 결과 캐싱
 let cachedIndicatorResults = {}; // 지표별 월별 결과 캐싱
 
+// resultApi가 없을 때 사용할 기본 객체 정의
+if (!window.resultApi) {
+  console.log('resultApi가 정의되지 않아 기본 객체를 생성합니다.');
+  window.resultApi = {
+    getResultsByOrganization: async (orgCode) => {
+      console.log(`기본 resultApi: 기관 코드 ${orgCode}의 지표 결과 조회 시도`);
+      return { status: 'success', data: { results: [] } };
+    },
+    saveMonitoringResult: async (resultData) => {
+      console.log('기본 resultApi: 지표 결과 저장 시도:', resultData);
+      return { status: 'success', message: '지표 결과가 저장되었습니다.', data: { result: resultData } };
+    }
+  };
+}
+
 // 페이지 로드 시 로컬 스토리지에서 저장된 결과 복구
 document.addEventListener('DOMContentLoaded', () => {
   console.log('indicator.js - DOMContentLoaded 이벤트 발생');
@@ -268,6 +283,28 @@ window.loadIndicatorsByPeriod = async (period) => {
         // 지표 데이터 처리
         const indicators = data.data.indicators;
         
+        // API 응답 데이터 상세 로깅
+        console.log('===== API 응답 데이터 상세 =====');
+        console.log(`지표 개수: ${indicators.length}`);
+        if (indicators.length > 0) {
+          console.log('첫 번째 지표 데이터:', indicators[0]);
+          console.log('첫 번째 지표 필드명:', Object.keys(indicators[0]).join(', '));
+          
+          // 평가연계와 공통필수 필드 확인
+          const firstIndicator = indicators[0];
+          console.log('평가연계 필드 값:', {
+            isEvaluationLinked: firstIndicator.isEvaluationLinked,
+            evaluationLinked: firstIndicator.evaluationLinked,
+            '평가연계': firstIndicator['평가연계']
+          });
+          console.log('공통필수 필드 값:', {
+            isCommonRequired: firstIndicator.isCommonRequired,
+            commonRequired: firstIndicator.commonRequired,
+            '공통필수': firstIndicator['공통필수']
+          });
+        }
+        console.log('=================================');
+        
         // 지표 목록 렌더링
         await renderIndicatorsSidebar(indicators);
         
@@ -430,6 +467,7 @@ const renderIndicatorsSidebar = async (indicators) => {
       const indicatorId = indicator.id || '';
       const indicatorName = indicator.name || '이름 없는 지표';
       const indicatorCode = indicator.code || indicatorId;
+      const reviewMaterials = indicator.reviewMaterials || '';
       
       // 지표 ID가 없는 경우 건너뛰기
       if (!indicatorId) {
@@ -445,16 +483,48 @@ const renderIndicatorsSidebar = async (indicators) => {
                         (indicatorCode && indicatorCode.startsWith('H')) || 
                         (indicatorCode && indicatorCode.match(/H\d{3}/));
       
-      // 평가연계 지표 여부 확인
-      const isEvaluation = indicator.평가연계 === 'O';
+      // API 응답 데이터 구조 확인
+      console.log('현재 지표 데이터 구조:', Object.keys(indicator).join(', '));
+      
+      // 평가연계 지표 여부 확인 - 다양한 필드명 형식 지원
+      // 실제 API 응답에서 characteristic 필드를 사용하여 평가연계 여부 확인
+      const isEvaluationLinked = 
+        indicator.isEvaluationLinked === true || 
+        indicator.evaluationLinked === 'O' || 
+        indicator['평가연계'] === 'O' || 
+        indicator['평가연계'] === true ||
+        (indicator.characteristic && indicator.characteristic.includes('평가'));
+      
+      // 공통필수 여부 확인 - 다양한 필드명 형식 지원
+      // 실제 API 응답에서 characteristic 필드를 사용하여 공통필수 여부 확인
+      const isCommonRequired = 
+        indicator.isCommonRequired === true || 
+        indicator.commonRequired === 'O' || 
+        indicator['공통필수'] === 'O' || 
+        indicator['공통필수'] === true ||
+        (indicator.characteristic && indicator.characteristic === '필수');
+        
+      // 검토자료 필드 확인 - 다양한 필드명 형식 지원
+      // 실제 API 응답에서 description 필드를 검토자료로 사용
+      const reviewMaterialsText = 
+        indicator.reviewMaterials || 
+        indicator['검토자료'] || 
+        indicator.description || 
+        '';
 
       // 명확한 반기 모니터링 여부 판별
       const isSemiAnnualMonitoring = isSemiAnnual || 
                                   (currentPeriod === '반기' && !isYearly) || 
                                   (indicatorCode && indicatorCode.startsWith('H'));
       
-      // 디버그 로깅
-      console.log(`지표 항목 생성: ID=${indicatorId}, 이름=${indicatorName}, 코드=${indicatorCode}, 연중=${isYearly}, 특화=${isSpecial}, 반기=${isSemiAnnual}, 평가연계=${isEvaluation}`);
+      // 디버그 로깅 - 상세 정보 추가
+      console.log(`지표 항목 생성: ID=${indicatorId}, 이름=${indicatorName}, 코드=${indicatorCode}`);
+      console.log(`지표 유형: 연중=${isYearly}, 특화=${isSpecial}, 반기=${isSemiAnnual}`);
+      console.log(`필수 항목: 평가연계=${isEvaluationLinked}, 공통필수=${isCommonRequired}`);
+      console.log(`검토자료: ${reviewMaterialsText}`);
+      
+      // 지표 데이터 구조 로깅
+      console.log('지표 데이터 구조:', JSON.stringify(indicator, null, 2));
       
       // 캐시된 결과에서 이전 결과 조회
       const results = resultsByIndicator[indicatorId] || [];
@@ -509,20 +579,33 @@ const renderIndicatorsSidebar = async (indicators) => {
       
       // 카드 클래스 결정
       let cardClass = 'indicator-card border rounded p-3 mb-3';
+      
+      // 카테고리별 배경색 지정
       if (isYearly) {
+          // 연중 지표는 노란색 배경으로 구분
           cardClass += ' bg-yellow-50';
+          // 연중 지표임을 표시하는 왼쪽 보더 추가
+          cardClass += ' border-l-4 border-yellow-500';
       } else if (isSemiAnnualMonitoring) {
+          // 반기 지표는 파란색 배경으로 구분
           cardClass += ' bg-blue-50';
       } else if (isSpecial) {
+          // 특화 지표는 보라색 배경으로 구분
           cardClass += ' bg-purple-50';
       } else {
+          // 기본 지표는 회색 배경으로 구분
           cardClass += ' bg-gray-50';
       }
       
       // 평가연계 지표는 붉은 배경과 굵은 테두리로 강조
-      if (isEvaluation) {
+      if (isEvaluationLinked) {
           cardClass = cardClass.replace(/bg-\w+-50/g, 'bg-red-50');
           cardClass += ' border-red-500 border-2';
+      }
+      
+      // 공통필수 지표는 파란색 테두리로 강조
+      if (isCommonRequired && !isEvaluationLinked) {
+          cardClass += ' border-blue-500 border-2';
       }
       
       // 사이드바 항목 생성
@@ -534,20 +617,26 @@ const renderIndicatorsSidebar = async (indicators) => {
       // 지표 유형 표시 추가
       const typeTag = isYearly ? '<span class="text-xs text-red-500 mr-1">[연중]</span>' : '';
       const specialTag = isSpecial ? '<span class="text-xs text-purple-500 mr-1">[특화]</span>' : '';
-      const evaluationTag = isEvaluation ? '<span class="text-xs text-red-600 font-bold mr-1">[평가]</span>' : '';
+      const evaluationTag = isEvaluationLinked ? '<span class="text-xs text-red-600 font-bold mr-1">[평가연계]</span>' : '';
+      const requiredTag = isCommonRequired ? '<span class="text-xs text-blue-600 font-bold mr-1">[공통필수]</span>' : '';
       
       // 사이드바 항목의 HTML 구조를 개선하여 일관성 확보
       listItem.innerHTML = `
         <div class="flex items-center justify-between">
           <div class="indicator-info">
-            <div class="text-sm font-medium text-gray-800">${evaluationTag}${typeTag}${specialTag}${indicatorName}</div>
+            <div class="text-sm font-medium text-gray-800">${evaluationTag}${requiredTag}${typeTag}${specialTag}${indicatorName}</div>
             <div class="text-xs text-gray-500 mt-1">${indicatorCode}</div>
+            <div class="text-xs text-gray-500 mt-1 truncate" title="${reviewMaterialsText}">검토자료: ${reviewMaterialsText || '없음'}</div>
           </div>
           <div class="indicator-status">
             <span class="px-2 py-1 text-xs rounded-full ${statusClass} whitespace-nowrap">${resultStatus}${monthText}</span>
           </div>
         </div>
       `;
+      
+      // 개발용 디버그 정보 추가 (console에서 확인 가능)
+      listItem.dataset.evaluationLinked = isEvaluationLinked;
+      listItem.dataset.commonRequired = isCommonRequired;
       
       // 클릭 이벤트 - 지표 선택
       listItem.addEventListener('click', () => {
@@ -564,7 +653,7 @@ const renderIndicatorsSidebar = async (indicators) => {
         });
         
         // 평가연계 지표는 선택 시에도 붉은색 강조 유지하면서 추가 스타일 적용
-        if (isEvaluation) {
+        if (isEvaluationLinked) {
           listItem.classList.add('bg-red-100', 'pl-2');
         } else {
           listItem.classList.add('bg-blue-50', 'border-l-4', 'border-blue-500', 'pl-2');
@@ -707,7 +796,10 @@ const selectIndicator = async (indicator, previousResult) => {
     const indicatorId = indicator.id || '';
     const indicatorName = indicator.name || '이름 없는 지표';
     const indicatorCode = indicator.code || indicatorId;
-    const indicatorDesc = indicator.description || indicator.dataSource || '설명 없음';
+    
+    // 검토자료와 설명을 명확하게 구분
+    const reviewMaterials = indicator.reviewMaterials || indicator['검토자료'] || '';
+    const indicatorDesc = indicator.description || indicator.dataSource || indicator['설명'] || '설명 없음';
     
     // 특성 필드가 없으면 기본값 사용
     const characteristic = indicator.field5 === 'O' ? '공통필수' : 
@@ -772,6 +864,10 @@ const selectIndicator = async (indicator, previousResult) => {
         </div>
         <div class="mt-4">
           <h4 class="font-medium mb-2">검토자료</h4>
+          <p class="text-gray-700">${reviewMaterials || '검토자료 정보가 없습니다.'}</p>
+        </div>
+        <div class="mt-4">
+          <h4 class="font-medium mb-2">지표 설명</h4>
           <p class="text-gray-700">${indicatorDesc}</p>
         </div>
         <div class="mt-4">
@@ -2069,10 +2165,11 @@ window.periodTabClick = function(element, period) {
 
   // 직접 지표 로드 함수 호출
   console.log(`${period} 지표 로드 직접 호출`);
-  if (typeof loadIndicatorsByPeriod === 'function') {
-    loadIndicatorsByPeriod(period);
+  if (typeof window.loadIndicatorsByPeriod === 'function') {
+    console.log('전역 스코프에서 loadIndicatorsByPeriod 함수 호출');
+    window.loadIndicatorsByPeriod(period);
   } else {
-    console.error('loadIndicatorsByPeriod 함수를 찾을 수 없습니다.');
+    console.error('window.loadIndicatorsByPeriod 함수를 찾을 수 없습니다.');
   }
 };
 

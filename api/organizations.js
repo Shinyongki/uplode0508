@@ -54,8 +54,13 @@ module.exports = async (req, res) => {
     
     // 1.1 Google Sheets에서 직접 가져오기 시도
     try {
-      console.log('[api/organizations] Attempting to fetch data from Google Sheets');
-      const rawData = await sheetsHelper.readSheetData('committee_orgs!A:D');
+      // 요청에서 시트명 가져오기
+      const sheetName = req.query.sheet || 'committee_orgs';
+      console.log(`[api/organizations] Attempting to fetch data from Google Sheets, sheet: ${sheetName}`);
+      
+      // 시트명에 특수문자가 있을 수 있으므로 따옴표로 감싸서 사용
+      const formattedSheetName = sheetName.includes(' ') ? `'${sheetName}'` : sheetName;
+      const rawData = await sheetsHelper.readSheetData(`${formattedSheetName}!A:H`);
       
       // 데이터 가공
       const headers = rawData[0] || ['orgCode', 'orgName', 'mainCommittee', 'subCommittees'];

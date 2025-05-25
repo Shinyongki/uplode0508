@@ -1,2695 +1,3270 @@
 // 캘린더 관련 JavaScript 코드
-document.addEventListener('DOMContentLoaded', function() {
-  // 전역 변수
-  let currentDate = new Date();
+(function() {
+  // 전역 변수 선언
+  let currentYear, currentMonth, currentDate;
   let schedules = [];
-  let organizations = [];
   let committees = [];
+  let organizations = [];
   let currentUser = null;
+  let nextScheduleId = 1;
   let isDataLoading = false;
-  let committeeMap = {}; // 위원 ID -> 이름 매핑 캐시 추가
-  
+  let committeeMap = {};
+  let organizationMap = {};
+  let committeeOrgMatchings = []; // 추가: 매칭 정보를 저장할 변수
+
   // 로컬 스토리지 키 상수
   const LOCAL_STORAGE_SCHEDULES_KEY = 'calendar_schedules';
   const LOCAL_STORAGE_LAST_UPDATE_KEY = 'calendar_last_update';
-  
-  // 위원 번호에 따라 실제 이름으로 매핑하는 객체
-  const committeeNameMapping = {
-    1: '김수연',
-    2: '이연숙',
-    3: '이정혜',
-    4: '문일지',
-    5: '신용기'
+
+  // 디버깅 도구
+  const CalendarDebugger = {
+    errors: [],
+    warnings: [],
+    info: [],
+    
+    log: function(message, type = 'info', data = null) {
+      const timestamp = new Date().toISOString();
+      const prefix = `[${timestamp}] ${type.toUpperCase()}: `;
+      console.log(prefix + message);
+      
+      if (data) {
+        if (type === 'error') {
+          console.error('데이터:', data);
+        } else {
+          console.log('데이터:', data);
+        }
+      }
+      
+      if (message.includes('종합보고서')) {
+        console.log('%c' + message, 'background: #e3f2fd; color: #0d47a1; padding: 2px 5px; border-radius: 3px;');
+        if (data) {
+          console.log('%c종합보고서 데이터:', 'background: #e3f2fd; color: #0d47a1; padding: 2px 5px; border-radius: 3px;', data);
+        }
+      }
+      
+      const logEntry = { timestamp, message };
+      
+      if (type === 'error') {
+        this.errors.push(logEntry);
+      } else if (type === 'warning') {
+        this.warnings.push(logEntry);
+      } else {
+        this.info.push(logEntry);
+      }
+    },
+    
+    checkElement: function(selector, description) {
+      const element = document.querySelector(selector);
+      if (!element) {
+        this.log(`${description} (${selector}) 요소를 찾을 수 없습니다`, 'error');
+        return false;
+      }
+      this.log(`${description} (${selector}) 요소 확인 성공`, 'info');
+      return true;
+    },
+    
+    printStatus: function() {
+      console.group('현재 캘린더 상태');
+      console.log('오류가 발생했나요?', this.errors.length > 0 ? '예' : '아니오');
+      
+      if (this.errors.length > 0) {
+        console.group('발생한 오류들');
+        this.errors.forEach(e => console.log(`- ${e.message}`));
+        console.groupEnd();
+      }
+      
+      console.groupEnd();
+    }
   };
-  
-  // '모니터링위원N' 형식의 이름을 실제 이름으로 변환하는 함수
-  function mapCommitteeName(originalName) {
-    if (!originalName) return null;
-    
-    // '모니터링위원' 패턴 확인
-    if (originalName.startsWith('모니터링위원')) {
-      // 숫자 부분 추출 (예: '모니터링위원1' -> '1')
-      const numMatch = originalName.match(/모니터링위원(\d+)/);
-      if (numMatch && numMatch[1]) {
-        const committeeNum = parseInt(numMatch[1], 10);
-        // 번호에 따라 실제 이름 반환
-        if (committeeNameMapping[committeeNum]) {
-          return committeeNameMapping[committeeNum];
-        }
-      }
-    }
-    
-    // 패턴이 맞지 않으면 원래 이름 반환
-    return originalName;
-  }
-  
-  // 초기화 함수 최적화
-  async function initialize() {
+
+  // 기본 인증 헤더 가져오기 함수
+  function getAuthHeaders() {
     try {
-      console.time('캘린더 초기화 시간');
-      console.log('캘린더 초기화 시작...');
-      
-      // 로딩 표시기 추가
-      showLoadingIndicator();
-      
-      // 동적 스타일 추가
-      addCalendarStyles();
-      
-      // 달력 먼저 빈 상태로 렌더링
-      renderCalendar(currentDate);
-      
-      // 이벤트 리스너 설정
-      setupEventListeners();
-      
-      // 단계 1: 현재 사용자 정보 로드
-      currentUser = await getCurrentUser().catch(err => {
-        console.error('사용자 정보 로드 실패:', err);
-        return null;
-      });
-      
-      // 현재 사용자 정보가 없으면 로그인이 필요한 상태
-      if (!currentUser) {
-        console.warn('로그인된 사용자 정보가 없습니다. 로그인 화면으로 이동이 필요할 수 있습니다.');
-        hideLoadingIndicator();
-        showNotification('로그인 정보를 확인할 수 없습니다. 페이지를 새로고침하거나 다시 로그인해주세요.', 'warning');
-        return;
+      if (typeof window.getAuthHeaders === 'function') {
+        return window.getAuthHeaders();
       }
       
-      console.log(`초기화 - 현재 사용자: ${currentUser.name}, 역할: ${currentUser.role}, ID: ${currentUser.id}`);
+      const token = localStorage.getItem('authToken') || sessionStorage.getItem('authToken') || '';
+      let authHeaders = {};
       
-      // localStorage에 현재 사용자 정보를 저장
-      localStorage.setItem('currentCommittee', JSON.stringify(currentUser));
-      
-      // 단계 2: 매칭 데이터 로드 (최우선)
-      await loadMasterMatchingData().catch(err => {
-        console.error('매칭 정보 로드 실패:', err);
-      });
-      
-      // 단계 3: 필수 데이터 병렬 로드
-      const [committeesResult, organizationsResult] = await Promise.all([
-        getCommittees().catch(err => {
-          console.error('위원 목록 로드 실패:', err);
-          return null;
-        }),
-        getOrganizations().catch(err => {
-          console.error('기관 목록 로드 실패:', err);
-          return null;
-        })
-      ]);
-      
-      // 드롭다운 업데이트
-      updateCommitteeDropdown();
-      updateOrganizationDropdown();
-      
-      // 단계 4: 일정 데이터 로드 및 캘린더 최종 업데이트
-      // 먼저 로컬 스토리지에서 데이터를 복원 시도
-      const localDataRestored = restoreSchedulesFromLocalStorage();
-      
-      if (localDataRestored) {
-        console.log('로컬 스토리지에서 일정 데이터 복원 성공:', schedules.length);
-        renderCalendar(currentDate);
+      if (token) {
+        authHeaders = {
+          'Authorization': `Bearer ${token}`
+        };
       }
       
-      // 그 후에 API에서 데이터 가져오기 시도 (로컬 데이터가 있어도 항상 시도)
-      await getSchedules().catch(err => {
-        console.error('일정 데이터 로드 오류:', err);
-        if (!localDataRestored) {
-          // API와 로컬 모두 실패한 경우에만 경고
-          showNotification('서버에서 일정을 가져올 수 없습니다. 페이지를 새로고침하거나 나중에 다시 시도해 주세요.', 'warning');
-        }
-      });
-      
-      // 로컬 스토리지에 저장된 타겟 날짜가 있는지 확인
-      const targetDate = localStorage.getItem('calendar_target_date');
-      if (targetDate) {
-        console.log(`저장된 타겟 날짜 발견: ${targetDate}, 해당 날짜로 이동합니다.`);
-        goToCalendarDate(targetDate);
-        
-        // 저장된 날짜 데이터 삭제
-        localStorage.removeItem('calendar_target_date');
-        localStorage.removeItem('calendar_from_report');
-      } else {
-        // 타겟 날짜가 없으면 현재 날짜로 달력 업데이트
-        renderCalendar(currentDate);
-      }
-      
-      console.log('모든 데이터 로드 완료: 위원 수:', committees.length, '기관 수:', organizations.length, '일정 수:', schedules.length);
-      
-      // 로컬 스토리지에 백업
-      saveSchedulesToLocalStorage();
-      
-      // 로딩 표시기 제거
-      hideLoadingIndicator();
-      console.timeEnd('캘린더 초기화 시간');
-      console.log('초기화 완료 - UI 렌더링 준비됨');
-      
-    } catch (error) {
-      console.error('초기화 오류:', error);
-      hideLoadingIndicator();
-      showNotification('오류가 발생했습니다. 페이지를 새로고침해 주세요.', 'error');
-    }
-  }
-  
-  // 마스터 페이지에서 기관-위원 매칭 정보 로드
-  async function loadMasterMatchingData() {
-    // 이미 로드되었거나 로딩 중인 경우 중복 실행 방지
-    if (window.allMatchings && window.allOrganizations || isDataLoading) {
-      console.log('이미 마스터 페이지에서 매칭 정보가 로드되어 있거나 로딩 중입니다');
-      return;
-    }
-    
-    isDataLoading = true;
-    
-    try {
-      console.log('마스터 페이지에서 매칭 정보 로드 시도...');
-      
-      // 기관-위원 매칭 정보 가져오기
-      let matchingsResult = null;
-      let matchingsResponse;
-      
-      // 현재 사용자가 일반 위원인 경우 위원별 매칭 API 먼저 시도
-      if (currentUser && currentUser.role !== 'master' && currentUser.id) {
-        // 위원 ID에서 'C' 접두사 제거하고 숫자만 추출
-        const committeeIdRaw = currentUser.id;
-        let committeeIdWithoutPrefix = committeeIdRaw.replace(/^C/i, '');
-        
-        // 위원 ID가 숫자가 아닌 이름으로 구성된 경우 (ex: "C문일지")
-        if (isNaN(parseInt(committeeIdWithoutPrefix))) {
-          // ID에서 'C' 접두사 제거
-          committeeIdWithoutPrefix = committeeIdRaw.startsWith('C') 
-            ? committeeIdRaw.substring(1)  // C문일지 -> 문일지
-            : committeeIdRaw;             // 문일지 -> 문일지
-            
-          console.log(`위원 이름 기반 ID: ${committeeIdWithoutPrefix}`);
-        }
-        
-        console.log(`현재 위원(${currentUser.id})의 매칭 정보 로드 시도 - API 호출 ID: ${committeeIdWithoutPrefix}`);
-        
-        // 가장 성공 확률이 높은 엔드포인트를 먼저 시도 (서버 로그 기반 분석)
-        const priorityEndpoint = `/api/committees/matchings?committeeId=${committeeIdWithoutPrefix}`;
-        console.log(`우선 엔드포인트 시도: ${priorityEndpoint}`);
-        
-        try {
-          matchingsResponse = await fetch(priorityEndpoint, {
-            method: 'GET',
-            headers: {
-              'Content-Type': 'application/json',
-              'Cache-Control': 'no-cache, no-store, must-revalidate'
-            },
-            credentials: 'include'
-          });
-          
-          if (matchingsResponse.ok) {
-            matchingsResult = await matchingsResponse.json();
-            console.log(`위원별 매칭 API 호출 성공 (${priorityEndpoint})`);
-            
-            if (matchingsResult.status === 'success' && matchingsResult.data && matchingsResult.data.matchings) {
-              console.log(`매칭 데이터 로드 성공: ${matchingsResult.data.matchings.length}개`);
-            } else {
-              matchingsResult = null; // 유효한 데이터가 없으면 null로 설정하여 다음 시도로 넘어가게 함
-              console.warn(`위원별 매칭 API 응답은 성공했지만 데이터가 유효하지 않음 (${priorityEndpoint})`);
-            }
-          } else {
-            console.warn(`위원별 매칭 API 응답 오류 (${priorityEndpoint}): ${matchingsResponse.status}`);
-          }
-        } catch (err) {
-          console.warn(`위원별 매칭 API 호출 실패 (${priorityEndpoint}):`, err);
-        }
-        
-        // 우선 엔드포인트 실패 시 다른 엔드포인트 시도
-        if (!matchingsResult || !matchingsResult.data || !matchingsResult.data.matchings) {
-          // 여러 API 엔드포인트 형식 시도
-          const apiEndpoints = [
-            `/api/committees/${committeeIdWithoutPrefix}/matchings`,
-            `/api/committees/matching/${committeeIdWithoutPrefix}`,
-            `/api/committees/${committeeIdRaw}/matchings`,
-            `/api/matchings/committee/${committeeIdWithoutPrefix}`
-          ];
-          
-          // 각 엔드포인트 시도
-          for (const endpoint of apiEndpoints) {
-            try {
-              console.log(`API 엔드포인트 시도: ${endpoint}`);
-              const response = await fetch(endpoint, {
-                method: 'GET',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Cache-Control': 'no-cache, no-store, must-revalidate'
-                },
-                credentials: 'include'
-              });
-              
-              if (response.ok) {
-                const result = await response.json();
-                if (result.status === 'success' && result.data && result.data.matchings) {
-                  console.log(`위원별 매칭 API 호출 성공 (${endpoint})`);
-                  matchingsResult = result;
-                  break; // 성공한 경우 루프 종료
-                } else {
-                  console.warn(`위원별 매칭 API 응답은 성공했지만 데이터가 유효하지 않음 (${endpoint})`);
-                }
-              } else {
-                console.warn(`위원별 매칭 API 응답 오류 (${endpoint}): ${response.status}`);
-              }
-            } catch (err) {
-              console.warn(`위원별 매칭 API 호출 실패 (${endpoint}):`, err);
-            }
-          }
-        }
-      }
-      
-      // 위원별 매칭 API 시도가 실패했거나 관리자인 경우 전체 매칭 API 시도
-      if (!matchingsResult || !matchingsResult.data || !matchingsResult.data.matchings) {
-        console.log('전체 매칭 정보 로드 시도');
-        
-        // 여러 가능한 엔드포인트 시도
-        const apiEndpoints = [
-          '/api/committees/matchings',
-          '/api/committees/matching',
-          '/api/matchings'
-        ];
-        
-        for (const endpoint of apiEndpoints) {
-          try {
-            console.log(`API 엔드포인트 시도: ${endpoint}`);
-            matchingsResponse = await fetch(endpoint, {
-              method: 'GET',
-              headers: {
-                'Content-Type': 'application/json',
-                'Cache-Control': 'no-cache, no-store, must-revalidate'
-              },
-              credentials: 'include'
-            });
-            
-            if (matchingsResponse.ok) {
-              matchingsResult = await matchingsResponse.json();
-              console.log(`기본 매칭 API 호출 성공 (${endpoint})`);
-              break; // 성공한 경우 루프 종료
-            } else {
-              console.warn(`기본 매칭 API 응답 오류 (${endpoint}): ${matchingsResponse.status}`);
-            }
-          } catch (err) {
-            console.warn(`기본 매칭 API 호출 실패 (${endpoint}):`, err);
-          }
-        }
-      }
-      
-      // 매칭 결과 처리
-      if (matchingsResult && matchingsResult.status === 'success' && matchingsResult.data && matchingsResult.data.matchings) {
-        // 전역 객체에 매칭 정보 저장
-        window.allMatchings = matchingsResult.data.matchings;
-        console.log('매칭 정보 로드 성공:', window.allMatchings.length, '개');
-        
-        if (window.allMatchings.length > 0) {
-          console.log('매칭 정보 샘플:', window.allMatchings.slice(0, 3));
-        }
-        
-        // 현재 사용자의 매칭 정보 필터링
-        if (currentUser && currentUser.role !== 'master') {
-          // 다양한 사용자 ID 형식 처리 (확장)
-          const userIdVariations = [];
-          
-          // 원시 ID 형식 추가
-          if (currentUser.id) {
-            userIdVariations.push(currentUser.id);
-            
-            // C 접두사 있는 경우 제거, 없는 경우 추가
-            if (currentUser.id.startsWith('C')) {
-              userIdVariations.push(currentUser.id.substring(1));
-            } else {
-              userIdVariations.push(`C${currentUser.id}`);
-            }
-            
-            // 이름 기반 ID 형식 추가
-            if (currentUser.name) {
-              userIdVariations.push(`C${currentUser.name}`);
-            }
-          }
-          
-          // 현재 사용자의 매칭 정보 필터링 - 향상된 필터링 로직
-          const userMatchings = window.allMatchings.filter(match => {
-            // ID로 매칭 시도
-            const idMatched = userIdVariations.some(id => 
-              match.committeeId === id || 
-              match.committeeId === id.replace(/^C/, '') || 
-              match.committeeId === `C${id}`
-            );
-            
-            // 이름으로 매칭 시도
-            const nameMatched = currentUser.name && match.committeeName === currentUser.name;
-            
-            return idMatched || nameMatched;
-          });
-          
-          console.log(`현재 위원(${currentUser.name})의 매칭 정보:`, userMatchings.length, '개');
-          
-          if (userMatchings.length > 0) {
-            // 매칭된 기관 코드 추출 (중복 제거)
-            const matchedOrgCodes = [...new Set(userMatchings.map(match => match.orgCode))];
-            console.log(`현재 위원 담당 기관 수: ${matchedOrgCodes.length}개`);
-            console.log(`담당 기관 코드: ${JSON.stringify(matchedOrgCodes)}`);
-          }
-        }
-      } else {
-        console.warn('매칭 정보 로드 실패 - 모든 API 시도 실패');
-        window.allMatchings = []; // 빈 배열로 초기화
-      }
-      
-      // 모든 기관 정보 가져오기 - 여러 엔드포인트 시도
-      let orgsResponse;
-      let orgsResult;
-      
-      // 여러 가능한 기관 API 엔드포인트 시도
-      const orgApiEndpoints = [
-        '/api/organizations',
-        '/api/organizations/all',
-        '/api/organizations/test'
-      ];
-      
-      for (const endpoint of orgApiEndpoints) {
-        try {
-          console.log(`기관 API 엔드포인트 시도: ${endpoint}`);
-          orgsResponse = await fetch(endpoint, {
-            method: 'GET',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            credentials: 'include'
-          });
-          
-          if (orgsResponse.ok) {
-            orgsResult = await orgsResponse.json();
-            console.log(`기관 API 호출 성공 (${endpoint})`);
-            break; // 성공한 경우 루프 종료
-          } else {
-            console.warn(`기관 API 응답 오류 (${endpoint}): ${orgsResponse.status}`);
-          }
-        } catch (err) {
-          console.warn(`기관 API 호출 실패 (${endpoint}):`, err);
-        }
-      }
-      
-      // 기관 결과 처리
-      if (orgsResult && orgsResult.status === 'success' && orgsResult.data && orgsResult.data.organizations) {
-        // 전역 객체에 기관 정보 저장
-        window.allOrganizations = orgsResult.data.organizations;
-        console.log('기관 정보 로드 성공:', window.allOrganizations.length, '개');
-        console.log('기관 정보 샘플:', window.allOrganizations.slice(0, 3));
-      } else {
-        console.warn('기관 정보 로드 실패 - 모든 API 시도 실패');
-        
-        // 매칭 정보에서 기관 정보 추출
-        if (window.allMatchings && window.allMatchings.length > 0) {
-          console.log('매칭 정보에서 기관 정보 추출 시도');
-          
-          // 고유한 기관 코드 집합 생성
-          const uniqueOrgCodes = new Set();
-          window.allMatchings.forEach(match => {
-            if (match.orgCode) {
-              uniqueOrgCodes.add(match.orgCode);
-            }
-          });
-          
-          // 고유한 기관 정보 목록 생성
-          window.allOrganizations = Array.from(uniqueOrgCodes).map(orgCode => {
-            // 해당 기관 코드의 첫 번째 매칭 정보 찾기
-            const matchingInfo = window.allMatchings.find(m => m.orgCode === orgCode);
-            return {
-              code: orgCode,
-              name: matchingInfo ? matchingInfo.orgName : `기관 ${orgCode}`,
-              region: matchingInfo ? matchingInfo.region : ''
-            };
-          });
-          
-          console.log('매칭 정보에서 추출한 기관 정보:', window.allOrganizations.length, '개');
-        } else {
-          window.allOrganizations = []; // 빈 배열로 초기화
-        }
-      }
-      
-      // 기관 드롭다운 업데이트
-      updateOrganizationDropdown();
-      
-    } catch (error) {
-      console.warn('매칭 정보 로드 중 오류:', error);
-      // 오류 시 빈 배열로 초기화
-      window.allMatchings = [];
-      window.allOrganizations = [];
-    } finally {
-      isDataLoading = false;
-    }
-  }
-  
-  // 달력 렌더링 함수
-  function renderCalendar(date) {
-    // 캘린더 요소 가져오기
-    const calendarGrid = document.getElementById('calendar-grid');
-    const monthYearElement = document.getElementById('month-year');
-    
-    if (!calendarGrid || !monthYearElement) {
-      console.error('캘린더 요소를 찾을 수 없습니다.');
-      return;
-    }
-    
-    // 날짜 데이터 설정
-    const year = date.getFullYear();
-    const month = date.getMonth();
-    
-    // 월 이름 배열
-    const monthNames = [
-      '1월', '2월', '3월', '4월', '5월', '6월',
-      '7월', '8월', '9월', '10월', '11월', '12월'
-    ];
-    
-    // 제목 업데이트
-    monthYearElement.textContent = `${year}년 ${monthNames[month]}`;
-    
-    // 캘린더 초기화
-    calendarGrid.innerHTML = '';
-    
-    // 요일 이름 배열 - 평일만 (월~금)
-    const dayNames = ['월', '화', '수', '목', '금'];
-    
-    // 요일 헤더 추가
-    const weekdaysRow = document.createElement('div');
-    weekdaysRow.classList.add('weekdays');
-    
-    for (let i = 0; i < 5; i++) {
-      const dayEl = document.createElement('div');
-      dayEl.classList.add('weekday');
-      dayEl.textContent = dayNames[i];
-      weekdaysRow.appendChild(dayEl);
-    }
-    
-    calendarGrid.appendChild(weekdaysRow);
-    
-    // 한 달의 첫 날과 마지막 날 계산
-    const firstDay = new Date(year, month, 1);
-    const lastDay = new Date(year, month + 1, 0);
-    
-    // 월의 첫 날이 무슨 요일인지 계산 (0: 일요일, 1: 월요일, ..., 6: 토요일)
-    const firstDayOfWeek = firstDay.getDay();
-    
-    // 실제 캘린더에 표시할 첫 날짜 계산
-    // 평일만 표시 (월요일부터)하므로 월요일이 첫 날짜가 되도록 조정
-    let startDate = new Date(firstDay);
-    
-    // 첫 날이 토요일이나 일요일이면 다음 주 월요일로 이동
-    if (firstDayOfWeek === 0) { // 일요일
-      startDate.setDate(startDate.getDate() + 1); // 다음 날(월요일)로 설정
-    } else if (firstDayOfWeek === 6) { // 토요일
-      startDate.setDate(startDate.getDate() + 2); // 월요일로 설정
-    } else if (firstDayOfWeek > 1) { // 화~금요일이면
-      startDate.setDate(startDate.getDate() - (firstDayOfWeek - 1)); // 해당 주 월요일로 설정
-    }
-    
-    // 현재 날짜 설정
-    let currentDate = new Date(startDate);
-    
-    // 주별로 달력 행 생성
-    let calendarRow = document.createElement('div');
-    calendarRow.classList.add('calendar-row');
-    
-    // 달력 날짜 채우기
-    while (currentDate.getMonth() <= month) {
-      // 현재 요일 (0: 일요일, 1: 월요일, ..., 6: 토요일)
-      const dayOfWeek = currentDate.getDay();
-      
-      // 평일만 표시 (월~금)
-      if (dayOfWeek >= 1 && dayOfWeek <= 5) {
-        // 현재 행이 꽉 찼으면 새 행 생성
-        if (calendarRow.children.length === 5) {
-          calendarGrid.appendChild(calendarRow);
-          calendarRow = document.createElement('div');
-          calendarRow.classList.add('calendar-row');
-        }
-        
-        // 날짜 셀 생성
-        const dateCell = document.createElement('div');
-        dateCell.classList.add('calendar-cell');
-        
-        // 현재 달에 해당하는 날짜만 표시하고, 다른 달의 날짜는 빈 셀로 처리
-        if (currentDate.getMonth() === month) {
-          // 날짜 셀 내용 구성
-          const dateNum = document.createElement('div');
-          dateNum.classList.add('date-num');
-          dateNum.textContent = currentDate.getDate();
-          dateCell.appendChild(dateNum);
-          
-          // 날짜 데이터 속성 추가
-          const dateString = `${year}-${String(month + 1).padStart(2, '0')}-${String(currentDate.getDate()).padStart(2, '0')}`;
-          dateCell.setAttribute('data-date', dateString);
-          
-          // 오늘 날짜 강조
-          const today = new Date();
-          if (year === today.getFullYear() && month === today.getMonth() && currentDate.getDate() === today.getDate()) {
-            dateCell.classList.add('today');
-          }
-          
-          // 일정 표시
-          const dateSchedules = schedules.filter(schedule => {
-            const scheduleDate = schedule.scheduleDate || schedule.date || schedule.visitDate || schedule.startDate;
-            return scheduleDate && scheduleDate.startsWith(dateString);
-          });
-          
-          if (dateSchedules.length > 0) {
-            // 일정이 있는 날짜에는 특별한 클래스 추가
-            dateCell.classList.add('has-events');
-            
-            // 일정 표시를 위한 컨테이너 추가
-            const eventsContainer = document.createElement('div');
-            eventsContainer.classList.add('events-container');
-            
-            // 평일 표시에서는 한 칸이 넓어지므로 표시 개수 증가
-            const displayLimit = 4; // 최대 4개까지 표시
-            const displayCount = Math.min(displayLimit, dateSchedules.length);
-            
-            for (let i = 0; i < displayCount; i++) {
-              const event = document.createElement('div');
-              event.classList.add('event');
-              
-              // 일정 상태에 따른 클래스 추가
-              if (dateSchedules[i].status === 'completed') {
-                event.classList.add('completed');
-              } else if (dateSchedules[i].status === 'pending') {
-                event.classList.add('pending');
-              }
-              
-              // 위원별 색상 적용
-              if (dateSchedules[i].color) {
-                // 테두리 스타일 강화
-                event.style.borderLeftColor = dateSchedules[i].color;
-                event.style.borderLeftWidth = '4px'; // 좀 더 두껍게
-                event.style.borderLeftStyle = 'solid';
-                
-                // 방문기관 텍스트 배경색을 위원별 색상으로 설정 (투명도 적용)
-                const colorHex = dateSchedules[i].color;
-                
-                // 배경색 설정 (15% 투명도)
-                event.style.backgroundColor = `${colorHex}15`;
-                event.style.borderRadius = '4px';
-                
-                // 추가 테두리 효과 (30% 투명도)
-                event.style.border = `1px solid ${colorHex}30`;
-                
-                // 위원 구분을 위한 추가적인 시각적 표시
-                const committeeIndicator = document.createElement('span');
-                committeeIndicator.classList.add('committee-indicator');
-                committeeIndicator.style.backgroundColor = colorHex;
-                event.appendChild(committeeIndicator);
-                
-                // 디버깅 로그 추가
-                console.log(`이벤트에 색상 적용: ${colorHex}, 일정 ID: ${dateSchedules[i].id}`);
-              } else {
-                console.warn(`일정에 색상 정보 없음: ${dateSchedules[i].id}, 위원: ${dateSchedules[i].committeeName || dateSchedules[i].committeeId || '정보 없음'}`);
-              }
-              
-              // 현재 로그인한 사용자의 일정인 경우 강조 표시
-              if (currentUser && dateSchedules[i].committeeId === currentUser.id) {
-                event.classList.add('my-event');
-                event.style.fontWeight = 'bold';
-                event.style.boxShadow = '0 1px 3px rgba(0,0,0,0.2)';
-              }
-              
-              // 짧은 제목 표시
-              const eventTitle = document.createElement('span');
-              eventTitle.classList.add('event-title');
-              const title = dateSchedules[i].title || (dateSchedules[i].orgName ? `${dateSchedules[i].orgName} 방문` : '제목 없음');
-              
-              // 평일만 표시하므로 이름을 더 길게 표시할 수 있음
-              eventTitle.textContent = title.length > 20
-                ? title.substring(0, 17) + '...'
-                : title;
-                
-              // 방문기관명에 색상 강조 스타일 추가
-              eventTitle.style.color = '#333'; // 기본 글자색
-              eventTitle.style.fontWeight = 'medium'; // 약간 굵게 표시
-              
-              // 위원 이름 표시 (짧게)
-              const committeeSpan = document.createElement('small');
-              committeeSpan.classList.add('event-committee');
-              
-              // 표시할 위원 이름 결정
-              let displayCommitteeName = dateSchedules[i].committeeName || '';
-              
-              // 현재 로그인 사용자와 일정의 위원 ID가 일치하면 현재 사용자 이름 사용
-              if (currentUser && dateSchedules[i].committeeId === currentUser.id) {
-                displayCommitteeName = currentUser.name;
-              }
-              
-              committeeSpan.textContent = displayCommitteeName;
-              committeeSpan.style.marginLeft = '3px';
-              committeeSpan.style.opacity = '0.8';
-              committeeSpan.style.fontSize = '0.8em';
-              
-              // 위원 이름 배경색 추가
-              if (dateSchedules[i].color) {
-                const colorHex = dateSchedules[i].color;
-                committeeSpan.style.backgroundColor = `${colorHex}20`;
-                committeeSpan.style.color = colorHex;
-                committeeSpan.style.padding = '0px 4px';
-                committeeSpan.style.borderRadius = '2px';
-                committeeSpan.style.border = `1px solid ${colorHex}30`;
-              }
-              
-              event.appendChild(eventTitle);
-              event.appendChild(committeeSpan);
-              eventsContainer.appendChild(event);
-            }
-            
-            // 추가 일정이 있는 경우 표시
-            if (dateSchedules.length > displayLimit) {
-              const more = document.createElement('div');
-              more.classList.add('more-events');
-              more.textContent = `+${dateSchedules.length - displayLimit}`;
-              eventsContainer.appendChild(more);
-            }
-            
-            dateCell.appendChild(eventsContainer);
-            
-            // 클릭 이벤트 리스너 추가 (날짜 클릭 시 해당 날짜의 모든 일정 표시)
-            dateCell.addEventListener('click', () => showDateSchedules(dateString));
-          } else {
-            // 일정이 없는 날짜도 클릭 가능하게 설정 (일정 추가 모달 표시)
-            dateCell.addEventListener('click', () => showAddScheduleModal(dateString));
-          }
-        } else {
-          // 다른 달의 날짜는 빈 셀로 처리
-          dateCell.classList.add('empty');
-        }
-        
-        // 행에 날짜 셀 추가
-        calendarRow.appendChild(dateCell);
-      }
-      
-      // 다음 날짜로 이동
-      currentDate.setDate(currentDate.getDate() + 1);
-      
-      // 월이 변경되고, 새로운 주가 시작될 때(월요일)에만 계속 진행
-      // 금요일까지 표시했는데 월이 바뀌면 더 이상 표시하지 않음
-      if (currentDate.getMonth() > month && currentDate.getDay() === 1) {
-        break;
-      }
-    }
-    
-    // 마지막 행에 셀이 5개가 되지 않으면 빈 셀로 채우기
-    while (calendarRow.children.length < 5) {
-      const emptyCell = document.createElement('div');
-      emptyCell.classList.add('calendar-cell', 'empty');
-      calendarRow.appendChild(emptyCell);
-    }
-    
-    // 마지막 행 추가
-    if (calendarRow.children.length > 0) {
-      calendarGrid.appendChild(calendarRow);
-    }
-  }
-  
-  // 일정 추가 모달 표시 함수
-  async function showAddScheduleModal(date) {
-    try {
-      // 모달 초기화
-      const modal = document.getElementById('schedule-form-modal');
-      const modalTitle = document.getElementById('schedule-form-title');
-      const form = document.getElementById('schedule-form');
-      
-      if (!modal || !modalTitle || !form) {
-        console.error('일정 추가 모달 요소를 찾을 수 없습니다.');
-        return;
-      }
-      
-      // 모달 제목 설정
-      modalTitle.textContent = `${date} 일정 추가`;
-      
-      // 양식 초기화
-      form.reset();
-      
-      // 숨겨진 ID 필드 초기화
-      const scheduleIdField = document.getElementById('schedule-id');
-      if (scheduleIdField) {
-        scheduleIdField.value = '';
-      }
-      
-      // 날짜 필드 설정
-      const dateField = document.getElementById('schedule-date');
-      if (dateField) {
-        dateField.value = date;
-      }
-      
-      // "저장" 버튼 텍스트 변경
-      const saveButton = document.getElementById('save-schedule-btn');
-      if (saveButton) {
-        saveButton.textContent = '일정 추가';
-      }
-      
-      // 일정 저장 버튼 이벤트 설정
-      if (saveButton) {
-        // 기존 이벤트 리스너 제거
-        const newSaveButton = saveButton.cloneNode(true);
-        saveButton.parentNode.replaceChild(newSaveButton, saveButton);
-        
-        // 새 이벤트 리스너 추가
-        newSaveButton.addEventListener('click', async () => {
-          await addSchedule();
-        });
-      }
-      
-      // 모달 표시
-      modal.style.display = 'block';
-      
-      // 드롭다운 업데이트 (현재 로그인 사용자 정보 반영)
-      updateCommitteeDropdown();
-      updateOrganizationDropdown();
-      
-    } catch (error) {
-      console.error('일정 추가 모달 표시 중 오류:', error);
-      showNotification('일정 추가 모달을 표시하는 중 오류가 발생했습니다.', 'error');
-    }
-  }
-  
-  // 이벤트 리스너 설정
-  function setupEventListeners() {
-    // 이전 달 버튼
-    document.getElementById('prev-month').addEventListener('click', () => {
-      currentDate = new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1);
-      renderCalendar(currentDate);
-    });
-    
-    // 다음 달 버튼
-    document.getElementById('next-month').addEventListener('click', () => {
-      currentDate = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1);
-      renderCalendar(currentDate);
-    });
-    
-    // 현재 월로 이동 버튼
-    document.getElementById('today-btn').addEventListener('click', () => {
-      currentDate = new Date();
-      renderCalendar(currentDate);
-    });
-    
-    // 전역 함수로 등록 (다른 스크립트에서 접근 가능하도록)
-    window.goToCalendarDate = goToCalendarDate;
-    
-    // 모달 닫기 버튼
-    document.querySelectorAll('.close-modal').forEach(button => {
-      button.addEventListener('click', () => {
-        document.querySelectorAll('.modal').forEach(modal => {
-          modal.style.display = 'none';
-        });
-      });
-    });
-    
-    // 모달 외부 클릭 시 닫기
-    window.addEventListener('click', (event) => {
-      document.querySelectorAll('.modal').forEach(modal => {
-        if (event.target === modal) {
-          modal.style.display = 'none';
-        }
-      });
-    });
-    
-    // 일정 추가 양식 제출
-    document.getElementById('schedule-form').addEventListener('submit', async (event) => {
-      event.preventDefault();
-      await addSchedule();
-    });
-    
-    // 이전으로 버튼 클릭 시 일정 데이터 로컬 스토리지 저장
-    const backBtn = document.getElementById('back-btn');
-    if (backBtn) {
-      backBtn.addEventListener('click', () => {
-        console.log('이전으로 버튼 클릭 - 일정 데이터 저장');
-        saveSchedulesToLocalStorage();
-      });
-    }
-    
-    // 페이지 이동 감지 이벤트 처리
-    window.addEventListener('beforeunload', function(event) {
-      // 페이지를 떠나기 전 일정 데이터를 로컬 스토리지에 저장
-      console.log('페이지 이동 감지: 일정 데이터 저장 중...');
-      saveSchedulesToLocalStorage();
-    });
-    
-    // 페이지 복귀 감지 이벤트
-    window.addEventListener('pageshow', function(event) {
-      // bfcache에서 복원된 경우에만 처리 (뒤로가기 등으로 돌아온 경우)
-      if (event.persisted) {
-        console.log('페이지 복귀 감지: 일정 데이터 복원 시도');
-        
-        // 로컬 스토리지에서 데이터 복원
-        restoreSchedulesFromLocalStorage();
-        
-        // 달력 다시 렌더링
-        renderCalendar(currentDate);
-        
-        // API에서 새로운 데이터도 가져오기 시도
-        getSchedules().catch(err => {
-          console.error('페이지 복귀 후 일정 데이터 새로고침 실패:', err);
-        });
-      }
-    });
-    
-    // visibility change 이벤트를 통한 탭 전환 감지
-    document.addEventListener('visibilitychange', function() {
-      if (document.visibilityState === 'visible') {
-        console.log('탭 포커스 복귀: 일정 데이터 복원 시도');
-        
-        // 탭이 보이게 되었을 때 데이터 복원 시도
-        const restored = restoreSchedulesFromLocalStorage();
-        
-        // 캘린더 업데이트
-        renderCalendar(currentDate);
-        
-        // 최신 데이터도 가져오기 시도
-        getSchedules().catch(err => {
-          console.error('탭 포커스 복귀 후 일정 데이터 새로고침 실패:', err);
-        });
-      } else if (document.visibilityState === 'hidden') {
-        // 탭이 숨겨질 때 데이터 저장
-        console.log('탭 포커스 이탈: 일정 데이터 저장');
-        saveSchedulesToLocalStorage();
-      }
-    });
-    
-    // 다른 페이지에서 일정 업데이트 이벤트 감지
-    if (typeof addScheduleUpdateListener === 'function') {
-      addScheduleUpdateListener(function(type, data) {
-        console.log(`캘린더: 다른 페이지에서 일정 ${type} 이벤트 수신`, data);
-        
-        // 캘린더 페이지가 보이는 상태인 경우에만 업데이트
-        if (document.visibilityState === 'visible') {
-          // 일정 데이터 업데이트
-          if (type === 'add') {
-            // 이미 존재하는 일정인지 확인
-            const existingIndex = schedules.findIndex(s => s.id === data.id);
-            if (existingIndex === -1) {
-              schedules.push(data);
-            } else {
-              schedules[existingIndex] = data;
-            }
-          } else if (type === 'update') {
-            const index = schedules.findIndex(s => s.id === data.id);
-            if (index !== -1) {
-              schedules[index] = data;
-            }
-          } else if (type === 'delete') {
-            schedules = schedules.filter(s => s.id !== data.id);
-          }
-          
-          // 캘린더 다시 렌더링
-          renderCalendar(currentDate);
-          
-          // 로컬 스토리지에 저장
-          saveSchedulesToLocalStorage();
-        }
-      });
-    }
-  }
-  
-  // 로딩 표시기 관련 함수
-  function showLoadingIndicator() {
-    const loadingIndicator = document.getElementById('loadingIndicator');
-    if (loadingIndicator) {
-      loadingIndicator.style.display = 'flex';
-    }
-  }
-  
-  function hideLoadingIndicator() {
-    const loadingIndicator = document.getElementById('loadingIndicator');
-    if (loadingIndicator) {
-      loadingIndicator.style.display = 'none';
-    }
-  }
-  
-  // 알림 메시지 표시 함수
-  function showNotification(message, type = 'info') {
-    const notification = document.getElementById('notification');
-    if (!notification) return;
-    
-    notification.textContent = message;
-    notification.className = `notification ${type}`;
-    notification.style.display = 'block';
-    
-    // 5초 후 자동으로 알림 숨기기
-    setTimeout(() => {
-      notification.style.display = 'none';
-    }, 5000);
-  }
-  
-  // 필요한 더미 함수들 추가
-  async function getCurrentUser() {
-    try {
-      // 먼저 localStorage에서 사용자 정보 확인
-      const storedUser = localStorage.getItem('currentCommittee');
-      if (storedUser) {
-        const parsedUser = JSON.parse(storedUser);
-        if (parsedUser && parsedUser.name) {
-          console.log(`localStorage에서 사용자 정보 로드: ${parsedUser.name}`);
-          return parsedUser;
-        }
-      }
-      
-      // localStorage에 정보가 없는 경우 API 호출 시도
-      try {
-        const response = await fetch('/auth/current', {
-          credentials: 'include'
-        });
-        
-        if (response.ok) {
-          const data = await response.json();
-          if (data.status === 'success' && data.data && data.data.committee) {
-            currentUser = data.data.committee;
-            // 로컬 스토리지에도 저장
-            localStorage.setItem('currentCommittee', JSON.stringify(currentUser));
-            console.log(`API에서 사용자 정보 로드: ${currentUser.name}`);
-            return currentUser;
-          }
-        }
-      } catch (err) {
-        console.warn('API에서 사용자 정보 로드 실패:', err);
-      }
-      
-      // 로컬 스토리지와 API 호출이 모두 실패한 경우만 기본값 사용
-      // auth.js에 정의된 글로벌 로그인 사용자 정보 가져오기 시도
-      if (typeof window.getCurrentUser === 'function') {
-        const authUser = window.getCurrentUser();
-        if (authUser) {
-          console.log(`auth.js에서 사용자 정보 로드: ${authUser.name}`);
-          return authUser;
-        }
-      }
-      
-      // 모든 방법이 실패한 경우에만 기본값 설정
-      console.warn('사용자 정보를 찾을 수 없어 기본값 사용');
-      return {
-        id: 'C001',
-        name: '신용기',
-        role: 'committee'
+      authHeaders = {
+        ...authHeaders,
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache, no-store, must-revalidate'
       };
+      
+      return authHeaders;
     } catch (error) {
-      console.error('사용자 정보 로드 오류:', error);
+      console.warn('인증 헤더 가져오기 오류:', error);
+      
       return {
-        id: 'C001',
-        name: '신용기',
-        role: 'committee'
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache, no-store, must-revalidate'
       };
     }
   }
-  
-  async function getCommittees() {
-    // API 연결이 안되는 경우를 위한 임시 더미 데이터
-    committees = [
-      { id: 'C001', name: '신용기' },
-      { id: 'C002', name: '문일지' },
-      { id: 'C003', name: '김수연' },
-      { id: 'C004', name: '이연숙' },
-      { id: 'C005', name: '이정혜' }
+
+  // 위원 색상 가져오기 함수
+  function getCommitteeColor(committeeIdOrName) {
+    // 위원별 고유한 색상 매핑 (이름 기반)
+    const committeeColorMap = {
+      '신용기': '#3498db',  // 파란색
+      '김지영': '#e74c3c',  // 빨간색
+      '김성우': '#2ecc71',  // 초록색
+      '김선영': '#f39c12',  // 주황색
+      '김지혜': '#9b59b6',  // 보라색
+      '이정혜': '#1abc9c',  // 청록색
+      '박지영': '#d35400',  // 강한 주황색
+      '박지훈': '#8e44ad',  // 진한 보라색
+      '박진영': '#27ae60',  // 진한 초록색
+      '박진우': '#2980b9',  // 진한 파란색
+      '박희영': '#c0392b',  // 진한 빨간색
+      '박희우': '#16a085'   // 진한 청록색
+    };
+    
+    // 기본 색상 배열 (매핑에 없는 위원용)
+    const defaultColors = [
+      '#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c',
+      '#d35400', '#8e44ad', '#27ae60', '#2980b9', '#c0392b', '#16a085'
     ];
-    return committees;
+    
+    // 위원 ID나 이름으로 색상 찾기
+    if (typeof committeeIdOrName === 'string' && committeeColorMap[committeeIdOrName]) {
+      return committeeColorMap[committeeIdOrName];
+    }
+    
+    // 위원 이름 찾기 시도
+    const committees = window.committees || [];
+    const committee = committees.find(c => c.id === committeeIdOrName || c.name === committeeIdOrName);
+    
+    if (committee && committee.name && committeeColorMap[committee.name]) {
+      return committeeColorMap[committee.name];
+    }
+    
+    // 색상 매핑에 없는 경우 기본 색상 배열에서 가져오기
+    const hash = String(committeeIdOrName).split('').reduce((acc, char) => {
+      return acc + char.charCodeAt(0);
+    }, 0);
+    
+    return defaultColors[hash % defaultColors.length] || defaultColors[0];
   }
   
-  async function getOrganizations() {
-    // API 연결이 안되는 경우를 위한 임시 더미 데이터
-    if (window.allOrganizations && window.allOrganizations.length > 0) {
-      organizations = window.allOrganizations;
+  // 전역 함수로 showScheduleDetail 노출
+  window.showScheduleDetail = function(scheduleId) {
+    if (window.calendarApp && typeof window.calendarApp.showScheduleDetail === 'function') {
+      window.calendarApp.showScheduleDetail(scheduleId);
     } else {
-      organizations = [
-        { code: 'A48250007', name: '김해돌봄지원센터', region: '김해시' },
-        { code: 'A48250004', name: '김해시종합사회복지관', region: '김해시' },
-        { code: 'A48250006', name: '보현행정노인통합지원센터', region: '김해시' },
-        { code: 'A48250005', name: '생명의전화노인통합지원센터', region: '김해시' },
-        { code: 'A48250001', name: '효동원노인통합지원센터', region: '김해시' },
-        { code: 'A48720001', name: '의령노인통합지원센터', region: '의령군' },
-        { code: 'A48740001', name: '사회적협동조합 창녕지역지활센터', region: '창녕군' },
-        { code: 'A48740002', name: '창녕군새누리노인종합센터', region: '창녕군' },
-        { code: 'A48120008', name: '경남노인통합지원센터', region: '창원시' },
-        { code: 'A48120011', name: '창원사회적협동조합', region: '창원시' },
-        { code: 'A48120013', name: '진해노인종합복지관', region: '창원시' },
-        { code: 'A48120012', name: '진해서부노인종합복지관', region: '창원시' },
-        { code: 'A48120004', name: '명진노인통합지원센터', region: '창원시 마산합포구' },
-        { code: 'A48120006', name: '성로노인통합지원센터', region: '창원시 의창구' },
-        { code: 'A48120001', name: '동진노인통합지원센터', region: '창원시 의창구' },
-        { code: 'A48730001', name: '대한노인회함안군지회', region: '함안군' },
-        { code: 'A48730002', name: '함안군재가노인통합지원센터', region: '함안군' }
-      ];
+      console.error('캘린더 앱이 초기화되지 않았거나 showScheduleDetail 함수를 찾을 수 없습니다.');
     }
-    return organizations;
-  }
-  
-  // 위원별 색상 매핑을 중앙에서 관리하는 객체 (단일 소스)
-  const COMMITTEE_COLORS = {
-    // 기본 위원 색상 (항상 일관된 색상 유지)
-    '김수연': '#FFCC00', // 노란색
-    '이연숙': '#33CC66', // 녹색
-    '이정혜': '#9933CC', // 보라색
-    '문일지': '#FF3366', // 분홍색
-    '신용기': '#3366FF', // 파란색
-    // 추가 ID 기반 매핑
-    'C001': '#3366FF', // 신용기
-    'C002': '#FF3366', // 문일지
-    'C003': '#FFCC00', // 김수연
-    'C004': '#33CC66', // 이연숙
-    'C005': '#9933CC'  // 이정혜
   };
   
-  // ID와 이름 기반 매핑을 생성하는 함수
-  function generateColorMapping() {
-    const colorMapping = {};
+  // 전역 함수로 openScheduleFormModal 노출
+  window.openScheduleFormModal = function(dateString, scheduleId = null) {
+    console.log('전역 openScheduleFormModal 호출:', dateString, scheduleId);
     
-    // 기본 이름 매핑
-    Object.keys(COMMITTEE_COLORS).forEach(name => {
-      colorMapping[name] = COMMITTEE_COLORS[name];
-      
-      // ID 기반 매핑 추가 ('C' 접두사)
-      colorMapping[`C${name}`] = COMMITTEE_COLORS[name];
-      
-      // 대문자 이름 매핑
-      colorMapping[name.toUpperCase()] = COMMITTEE_COLORS[name];
-    });
-    
-    // 번호 기반 매핑 (ID가 숫자인 경우)
-    Object.entries(committeeNameMapping).forEach(([num, name]) => {
-      if (COMMITTEE_COLORS[name]) {
-        const numValue = num.replace(/\D/g, '');
-        colorMapping[`C${numValue}`] = COMMITTEE_COLORS[name];
-        colorMapping[numValue] = COMMITTEE_COLORS[name];
-      }
-    });
-    
-    return colorMapping;
-  }
-  
-  // 위원별 색상 매핑 추가 (기존 코드 대체)
-  const committeeColors = generateColorMapping();
-  
-  // 동적 색상 배열 (위원 ID에 매핑된 색상이 없을 때 사용)
-  const colorPalette = [
-    '#3366FF', // 파란색
-    '#FF3366', // 분홍색
-    '#FFCC00', // 노란색
-    '#33CC66', // 녹색
-    '#9933CC', // 보라색
-    '#FF9933', // 주황색
-    '#00CCCC', // 청록색
-    '#6633FF', // 남색
-    '#CC3300', // 적갈색
-    '#669900'  // 올리브색
-  ];
-  
-  // 동적으로 할당된 색상 저장
-  const dynamicColors = {};
-  
-  // 기본 색상
-  const defaultColor = '#757575'; // 회색
-  
-  // 위원 ID로 색상 가져오기
-  function getCommitteeColor(committeeId) {
-    if (!committeeId) return defaultColor;
-    
-    // 문자열로 변환
-    const idStr = String(committeeId);
-    
-    // 디버깅 로그
-    console.log(`색상 요청 - ID: ${idStr}`);
-    
-    // 이미 매핑된 색상이 있으면 반환
-    if (committeeColors[idStr]) {
-      console.log(`직접 매핑 발견: ${idStr} -> ${committeeColors[idStr]}`);
-      return committeeColors[idStr];
-    }
-    
-    // 'C' 접두사가 없는 경우 추가해서 확인
-    if (!idStr.startsWith('C') && committeeColors[`C${idStr}`]) {
-      console.log(`C접두사 추가 매핑 발견: C${idStr} -> ${committeeColors[`C${idStr}`]}`);
-      return committeeColors[`C${idStr}`];
-    }
-    
-    // 'C' 접두사가 있는 경우 제거해서 확인
-    if (idStr.startsWith('C') && committeeColors[idStr.substring(1)]) {
-      console.log(`C접두사 제거 매핑 발견: ${idStr.substring(1)} -> ${committeeColors[idStr.substring(1)]}`);
-      return committeeColors[idStr.substring(1)];
-    }
-    
-    // ID가 숫자로만 구성된 경우 C00x 형식으로 시도
-    if (/^\d+$/.test(idStr)) {
-      const paddedId = `C${idStr.padStart(3, '0')}`;
-      if (committeeColors[paddedId]) {
-        console.log(`패딩된 ID 매핑 발견: ${paddedId} -> ${committeeColors[paddedId]}`);
-        return committeeColors[paddedId];
-      }
-    }
-    
-    // 위원 이름으로 확인 (ID가 이름일 수 있음)
-    const matchedName = Object.keys(COMMITTEE_COLORS).find(name => 
-      idStr.includes(name) || name.includes(idStr)
-    );
-    if (matchedName) {
-      console.log(`이름 포함 매핑 발견: ${matchedName} -> ${COMMITTEE_COLORS[matchedName]}`);
-      return COMMITTEE_COLORS[matchedName];
-    }
-    
-    // 이미 동적으로 할당된 색상이 있으면 반환
-    if (dynamicColors[idStr]) {
-      console.log(`동적 할당 색상 발견: ${idStr} -> ${dynamicColors[idStr]}`);
-      return dynamicColors[idStr];
-    }
-    
-    // 관리자는 기본 색상 사용
-    if (idStr === 'MASTER' || idStr === '관리자' || idStr === 'C관리자') {
-      return defaultColor;
-    }
-    
-    // 새로운 위원 ID에는 색상 팔레트에서 동적으로 색상 할당
-    const colorIndex = Object.keys(dynamicColors).length % colorPalette.length;
-    dynamicColors[idStr] = colorPalette[colorIndex];
-    console.log(`새 색상 동적 할당: ${idStr} -> ${dynamicColors[idStr]}`);
-    
-    return dynamicColors[idStr];
-  }
-  
-  // 일정 데이터 로드 함수 개선
-  async function getSchedules() {
     try {
-      console.log('일정 데이터 로드 시도...');
-      
-      // 현재 날짜 기준으로 월 범위 계산
-      const now = new Date();
-      const year = now.getFullYear();
-      const month = now.getMonth() + 1; // 0-indexed to 1-indexed
-      
-      // 현재 달의 시작일과 끝일
-      const startDate = `${year}-${month.toString().padStart(2, '0')}-01`;
-      const lastDay = new Date(year, month, 0).getDate();
-      const endDate = `${year}-${month.toString().padStart(2, '0')}-${lastDay}`;
-      
-      // API 엔드포인트 목록 (가능한 여러 형태 시도)
-      let endpoints = [
-        `/api/schedules/date-range?startDate=${startDate}&endDate=${endDate}`,
-        `/api/schedules?startDate=${startDate}&endDate=${endDate}`,
-        `/api/schedules/all`
-      ];
-      
-      // 관리자가 아닌 일반 위원이라도 모든 일정을 불러옴 (색상 구분을 위해)
-      if (currentUser && currentUser.role !== 'master' && currentUser.id) {
-        console.log(`위원 ${currentUser.name}(${currentUser.id})의 일정 포함 모든 일정 로드 시도`);
-      }
-      
-      let schedulesData = null;
-      
-      // 각 엔드포인트 시도
-      for (const endpoint of endpoints) {
-        try {
-          console.log(`일정 API 엔드포인트 시도: ${endpoint}`);
-          const response = await fetch(endpoint, {
-            method: 'GET',
-            headers: {
-              'Content-Type': 'application/json',
-              'Cache-Control': 'no-cache, no-store, must-revalidate'
-            },
-            credentials: 'include'
-          });
-          
-          if (response.ok) {
-            const result = await response.json();
-            if (result.status === 'success' && result.data && result.data.schedules) {
-              console.log(`일정 API 호출 성공 (${endpoint}): ${result.data.schedules.length}개 일정`);
-              schedulesData = result.data.schedules;
-              // 일정 데이터 샘플 및 위원 ID를 확인하기 위한 로그 추가
-              if (schedulesData.length > 0) {
-                console.log('일정 데이터 샘플:', schedulesData.slice(0, 3));
-                // 고유한 위원 ID 목록 출력
-                const committeeIds = [...new Set(schedulesData.map(s => s.committeeId))];
-                console.log('고유 위원 ID 목록:', committeeIds);
-              }
-              break; // 성공하면 루프 종료
-            } else {
-              console.warn(`일정 API 응답은 성공했지만 데이터가 유효하지 않음 (${endpoint})`);
-            }
-          } else {
-            console.warn(`일정 API 응답 오류 (${endpoint}): ${response.status}`);
-          }
-        } catch (err) {
-          console.warn(`일정 API 호출 실패 (${endpoint}):`, err);
-        }
-      }
-      
-      // API 호출 결과가 있으면 사용
-      if (schedulesData && schedulesData.length > 0) {
-        // 필터링하지 않고 모든 일정 표시
-        console.log(`모든 위원의 일정 ${schedulesData.length}개 표시 준비`);
-          
-        // 기존 로컬 스토리지 일정과 병합
-        const localSchedules = JSON.parse(localStorage.getItem(LOCAL_STORAGE_SCHEDULES_KEY) || '[]');
-        
-        // API 응답 필드 표준화
-        const standardizedApiSchedules = schedulesData.map(schedule => {
-          // 표준화된 일정 데이터 생성
-          const standardized = {
-            ...schedule,
-            // 필드 표준화 (일정을 볼 때 다양한 필드 이름 지원)
-            scheduleDate: schedule.scheduleDate || schedule.visitDate || schedule.date || schedule.startDate,
-            title: schedule.title || (schedule.orgName ? `${schedule.orgName} 방문 일정` : (schedule.orgCode ? `${schedule.orgCode} 방문 일정` : '제목 없음')),
-            status: schedule.status || 'pending',
-            // 위원 이름이 '모니터링위원N' 형식이면 실제 이름으로 변환
-            committeeName: schedule.committeeName ? mapCommitteeName(schedule.committeeName) : schedule.committeeName
-          };
-          
-          // 색상 적용을 위한 위원 ID 확인 및 색상 할당
-          if (schedule.committeeId) {
-            // 위원 ID가 문자열인지 확인
-            const committeeIdStr = String(schedule.committeeId);
-            // 위원 ID 정규화 (대소문자 구분 없이 prefix를 고려)
-            let normalizedId = committeeIdStr;
-            
-            // 'C' 접두사가 없으면 추가
-            if (!committeeIdStr.startsWith('C')) {
-              normalizedId = `C${committeeIdStr}`;
-            }
-            
-            // 실제 사용된 ID와 정규화된 ID 로그 출력
-            console.log(`일정 ID ${schedule.id}의 위원 ID: ${committeeIdStr}, 정규화: ${normalizedId}`);
-            
-            // 정규화된 ID로 색상 할당 - 직접 함수 호출
-            standardized.color = getCommitteeColor(normalizedId);
-            console.log(`일정 색상 할당: ${standardized.color} (ID: ${normalizedId})`);
-          } else if (schedule.committeeName) {
-            // 위원 ID가 없지만 이름이 있는 경우 이름으로 색상 찾기
-            standardized.color = getCommitteeColor(schedule.committeeName);
-            console.log(`이름으로 일정 색상 할당: ${standardized.color} (이름: ${schedule.committeeName})`);
-          } else {
-            // 위원 ID가 없으면 기본 색상 사용
-            standardized.color = defaultColor;
-          }
-          
-          return standardized;
-        });
-        
-        // 서버에서 가져온 데이터와 로컬 데이터 병합 (로컬 데이터 우선, 하지만 서버 데이터 인덱스 유지)
-        const mergedSchedules = [...standardizedApiSchedules];
-        
-        // 로컬에만 있는 일정 (예: 오프라인에서 추가한 일정) 추가
-        localSchedules.forEach(localSchedule => {
-          // 로컬 일정이 API 응답에 없는 경우만 추가 (id로 비교)
-          const existsInApi = standardizedApiSchedules.some(apiSchedule => 
-            apiSchedule.id === localSchedule.id
-          );
-          
-          if (!existsInApi) {
-            // 임시 ID(local_로 시작)이거나 서버에 없는 일정인 경우 추가
-            if (localSchedule.id.toString().startsWith('local_')) {
-              console.log('로컬에만 있는 일정 추가:', localSchedule);
-              // 위원 이름이 '모니터링위원N' 형식이면 실제 이름으로 변환
-              if (localSchedule.committeeName) {
-                localSchedule.committeeName = mapCommitteeName(localSchedule.committeeName);
-              }
-              
-              // 위원 ID 정규화 및 색상 적용
-              if (localSchedule.committeeId) {
-                const committeeIdStr = String(localSchedule.committeeId);
-                const normalizedId = committeeIdStr.startsWith('C') 
-                  ? committeeIdStr 
-                  : `C${committeeIdStr}`;
-                
-                localSchedule.color = getCommitteeColor(normalizedId);
-              } else {
-                localSchedule.color = defaultColor;
-              }
-              
-              mergedSchedules.push(localSchedule);
-            }
-          }
-        });
-        
-        schedules = mergedSchedules;
-        console.log(`최종 병합된 일정 데이터: ${schedules.length}개`);
-        
-        // 색상이 적용된 일정 데이터 샘플 로그 출력
-        console.log('색상이 적용된 일정 데이터 샘플:', schedules.slice(0, 3));
-        
-        // 로컬 스토리지에 백업
-        saveSchedulesToLocalStorage();
-      } else if (schedules.length === 0) {
-        // API와 메모리 모두에 데이터가 없는 경우 로컬 스토리지에서 복원 시도
-        const restored = restoreSchedulesFromLocalStorage();
-        
-        if (!restored) {
-          console.warn('모든 데이터 소스에서 일정을 불러올 수 없습니다. 더미 데이터 사용');
-          // 더미 데이터 (API와 로컬 스토리지 모두 실패한 경우만)
-          schedules = [
-            { id: 1, scheduleDate: '2023-08-10', title: '동진노인통합지원센터 방문', committeeId: 'C001', committeeName: '신용기', orgCode: 'A48120001', orgName: '동진노인통합지원센터', status: 'completed', color: getCommitteeColor('C001') },
-            { id: 2, scheduleDate: '2023-08-15', title: '김해돌봄지원센터 회의', committeeId: 'C002', committeeName: '문일지', orgCode: 'A48250007', orgName: '김해돌봄지원센터', status: 'pending', color: getCommitteeColor('C002') },
-            { id: 3, scheduleDate: '2023-08-20', title: '사회적협동조합 창녕지역지활센터 평가', committeeId: 'C003', committeeName: '김수연', orgCode: 'A48740001', orgName: '사회적협동조합 창녕지역지활센터', status: 'pending', color: getCommitteeColor('C003') }
-          ];
-        } else {
-          // 로컬 스토리지에서 복원한 경우에도 색상 추가
-          schedules = schedules.map(schedule => {
-            // 위원 ID 정규화 및 색상 적용
-            if (schedule.committeeId) {
-              const committeeIdStr = String(schedule.committeeId);
-              const normalizedId = committeeIdStr.startsWith('C') 
-                ? committeeIdStr 
-                : `C${committeeIdStr}`;
-              
-              return {
-                ...schedule,
-                color: getCommitteeColor(normalizedId)
-              };
-            } else {
-              return {
-                ...schedule,
-                color: defaultColor
-              };
-            }
-          });
-        }
-      }
-      
-      // 달력 다시 렌더링
-      renderCalendar(currentDate);
-      
-      return schedules;
-      
-    } catch (error) {
-      console.error('일정 데이터 로드 중 오류:', error);
-      
-      // 오류 발생 시 로컬 스토리지에서 복원 시도
-      if (schedules.length === 0) {
-        restoreSchedulesFromLocalStorage();
-        
-        // 색상 추가
-        schedules = schedules.map(schedule => {
-          // 위원 ID 정규화 및 색상 적용
-          if (schedule.committeeId) {
-            const committeeIdStr = String(schedule.committeeId);
-            const normalizedId = committeeIdStr.startsWith('C') 
-              ? committeeIdStr 
-              : `C${committeeIdStr}`;
-            
-            return {
-              ...schedule,
-              color: getCommitteeColor(normalizedId)
-            };
-          } else {
-            return {
-              ...schedule,
-              color: defaultColor
-            };
-          }
-        });
-      }
-      
-      return schedules;
-    }
-  }
-  
-  function updateCommitteeDropdown() {
-    const select = document.getElementById('schedule-committee');
-    if (!select) return;
-    
-    // 기존 옵션 제거
-    select.innerHTML = '';
-    
-    // 빈 옵션 추가
-    const emptyOption = document.createElement('option');
-    emptyOption.value = '';
-    emptyOption.textContent = '-- 위원 선택 --';
-    select.appendChild(emptyOption);
-    
-    // 위원 목록 옵션 추가
-    committees.forEach(committee => {
-      const option = document.createElement('option');
-      option.value = committee.id;
-      option.textContent = committee.name;
-      select.appendChild(option);
-    });
-    
-    // 현재 사용자가 위원인 경우 자동 선택 및 disabled 처리
-    if (currentUser && currentUser.role !== 'master' && currentUser.id) {
-      select.value = currentUser.id;
-      select.disabled = true; // 선택 비활성화
-    }
-  }
-  
-  function updateOrganizationDropdown() {
-    try {
+      // 직접 모달 열기 (전역 함수를 항상 사용)
+      const modal = document.getElementById('schedule-form-modal');
+      const form = document.getElementById('schedule-form');
+      const dateInput = document.getElementById('schedule-date');
+      const scheduleIdInput = document.getElementById('schedule-id');
+      const committeeSelect = document.getElementById('schedule-committee');
       const organizationSelect = document.getElementById('schedule-organization');
       
-      if (!organizationSelect) {
-        console.error('기관 선택 드롭다운을 찾을 수 없습니다.');
+      if (!modal || !form || !dateInput || !committeeSelect || !organizationSelect) {
+        console.error('필수 모달 요소를 찾을 수 없습니다:', {
+          modal: !!modal,
+          form: !!form,
+          dateInput: !!dateInput,
+          committeeSelect: !!committeeSelect,
+          organizationSelect: !!organizationSelect
+        });
+        
+        // 캘린더 앱이 초기화되었을 경우 대체 호출
+        if (window.calendarApp && typeof window.calendarApp.openScheduleFormModal === 'function') {
+          window.calendarApp.openScheduleFormModal(dateString, scheduleId);
+        }
         return;
       }
       
-      // 현재 선택된 값 저장
-      const selectedValue = organizationSelect.value;
+      // 모든 모달 닫기
+      document.querySelectorAll('.modal').forEach(m => {
+        m.style.display = 'none';
+      });
       
-      // 드롭다운 초기화
+      // 폼 초기화
+      form.reset();
+      
+      // 날짜 입력 필드 값 설정
+      dateInput.value = dateString;
+      
+      // 일정 ID 설정 (수정 모드인 경우)
+      if (scheduleId) {
+        scheduleIdInput.value = scheduleId;
+        document.getElementById('schedule-form-title').textContent = '일정 수정';
+        
+        // 기존 일정 정보 불러오기
+        console.log('기존 일정 정보 불러오기 시도:', scheduleId);
+        const existingSchedule = window.schedules ? window.schedules.find(s => s.id == scheduleId) : null;
+        
+        if (existingSchedule) {
+          console.log('기존 일정 정보 찾음:', existingSchedule);
+          
+          // 시간 설정
+          if (existingSchedule.startTime) {
+            document.getElementById('schedule-start-time').value = existingSchedule.startTime;
+          }
+          if (existingSchedule.endTime) {
+            document.getElementById('schedule-end-time').value = existingSchedule.endTime;
+          }
+          
+          // 제목 설정
+          if (existingSchedule.title) {
+            document.getElementById('schedule-title').value = existingSchedule.title;
+          }
+          
+          // 내용 설정
+          if (existingSchedule.content) {
+            document.getElementById('schedule-content').value = existingSchedule.content;
+          }
+          
+          // 위원 및 기관 정보는 loadCommitteeData 함수가 완료된 후 설정
+          window.existingScheduleToLoad = existingSchedule;
+        } else {
+          console.warn('기존 일정 정보를 찾을 수 없음:', scheduleId);
+          window.existingScheduleToLoad = null;
+        }
+      } else {
+        scheduleIdInput.value = '';
+        document.getElementById('schedule-form-title').textContent = '일정 추가';
+        window.existingScheduleToLoad = null;
+      }
+      
+      // 기관 정보 가져오기 함수
+    console.log('위원 정보 가져오기 시작');
+    
+    // 위원 선택 변경 시 기관 목록 업데이트
+    committeeSelect.addEventListener('change', function() {
+      const selectedCommitteeId = committeeSelect.value;
+      const selectedCommitteeName = committeeSelect.options[committeeSelect.selectedIndex]?.text || '';
+      console.log('위원 선택 변경 감지:', selectedCommitteeId, selectedCommitteeName);
+      
+      // 위원에 맞는 기관 코드 추출
+      const matchedOrgCodes = [];
+      
+      if (window.allMatchings && Array.isArray(window.allMatchings)) {
+        window.allMatchings.forEach(match => {
+          // 위원 ID나 위원명으로 매칭 확인
+          const matchCommitteeId = match.committeeId || match['위원ID'] || '';
+          const matchCommitteeName = match.committeeName || match['위원명'] || '';
+          const orgCode = match.orgCode || match['기관코드'] || '';
+          
+          // 위원 ID 또는 위원명이 일치하는 경우 기관 코드 추가
+          if (((matchCommitteeId && matchCommitteeId === selectedCommitteeId) || 
+              (matchCommitteeName && matchCommitteeName === selectedCommitteeName)) && 
+              orgCode && !matchedOrgCodes.includes(orgCode)) {
+            matchedOrgCodes.push(orgCode);
+          }
+        });
+      }
+      
+      console.log('위원에 매칭된 기관 코드:', matchedOrgCodes);
+      
+      // 기관 선택 초기화
       organizationSelect.innerHTML = '<option value="">기관 선택</option>';
       
-      // 지역 그룹별로 기관 정렬
-      const groupedOrgs = {};
-      
-      // 현재 위원(일반 사용자)의 매칭된 기관 코드 목록
-      let matchedOrgCodes = [];
-      
-      // 일반 위원 사용자인 경우 매칭된 기관만 표시
-      if (currentUser && currentUser.role !== 'master') {
-        console.log('현재 위원 정보:', currentUser);
+      // 매칭된 기관만 표시
+      if (matchedOrgCodes.length > 0) {
+        // 기관 정보 추출
+        const orgSet = new Set();
         
-        // JWT 토큰에서 조직 정보 가져오기 시도
-        if (currentUser.organizations && currentUser.organizations.mainOrgs) {
-          matchedOrgCodes = currentUser.organizations.mainOrgs.map(org => org.code);
-          console.log(`JWT 토큰에서 추출한 위원 ${currentUser.name}의 담당 기관 (${matchedOrgCodes.length}개):`, matchedOrgCodes);
-        }
-        // JWT에 정보가 없는 경우 기존 방식대로 시도
-        else if (window.allMatchings) {
-          // 사용자 ID 변형 (여러 가능한 ID 형식 처리)
-          const userIdVariations = [];
+        window.allMatchings.forEach(match => {
+          const orgCode = match.orgCode || match['기관코드'] || '';
+          const orgName = match.orgName || match['기관명'] || '';
+          const region = match.region || match['지역'] || '';
           
-          // 원시 ID 형식 추가
-          if (currentUser.id) {
-            userIdVariations.push(currentUser.id);
-            
-            // C 접두사 있는 경우 제거, 없는 경우 추가
-            if (currentUser.id.startsWith('C')) {
-              userIdVariations.push(currentUser.id.substring(1));
-            } else {
-              userIdVariations.push(`C${currentUser.id}`);
-            }
-            
-            // 이름 기반 ID 형식 (C + 이름) 추가
-            if (currentUser.name) {
-              userIdVariations.push(`C${currentUser.name}`);
-            }
+          if (orgCode && orgName && matchedOrgCodes.includes(orgCode)) {
+            orgSet.add(JSON.stringify({
+              code: orgCode,
+              name: orgName,
+              region: region
+            }));
           }
-          
-          console.log('위원 ID 변형:', userIdVariations);
-          console.log('모든 매칭 데이터:', window.allMatchings);
-          
-          // 현재 사용자의 매칭 정보 필터링
-          const userMatchings = window.allMatchings.filter(match => {
-            // ID로 매칭 시도
-            const idMatched = userIdVariations.some(id => 
-              match.committeeId === id || 
-              match.committeeId === id.replace(/^C/, '') || 
-              match.committeeId === `C${id}`
-            );
-            
-            // 이름으로 매칭 시도
-            const nameMatched = currentUser.name && match.committeeName === currentUser.name;
-            
-            return idMatched || nameMatched;
-          });
-          
-          console.log(`위원 ${currentUser.name}의 매칭 정보:`, userMatchings);
-          
-          // 매칭된 기관 코드 추출 (중복 제거)
-          matchedOrgCodes = [...new Set(userMatchings.map(match => match.orgCode))];
-          
-          console.log(`위원 ${currentUser.name}의 담당 기관 (${matchedOrgCodes.length}개):`, matchedOrgCodes);
-        }
-      }
-      
-      // 관리자인 경우 모든 기관 표시, 일반 위원은 매칭된 기관만 표시
-      const filteredOrgs = currentUser && currentUser.role !== 'master' && matchedOrgCodes.length > 0
-        ? organizations.filter(org => matchedOrgCodes.includes(org.code))
-        : organizations;
-      
-      // 기관 정보 정렬
-      filteredOrgs.forEach(org => {
-        const region = org.region || '기타';
-        if (!groupedOrgs[region]) {
-          groupedOrgs[region] = [];
-        }
-        groupedOrgs[region].push(org);
-      });
-      
-      // 지역별로 옵션 그룹 생성
-      Object.keys(groupedOrgs).sort().forEach(region => {
-        const optGroup = document.createElement('optgroup');
-        optGroup.label = region;
+        });
         
-        // 각 지역 내 기관을 이름 순으로 정렬
-        groupedOrgs[region].sort((a, b) => a.name.localeCompare(b.name)).forEach(org => {
+        // 기관 정보 변환 및 정렬
+        const organizations = Array.from(orgSet)
+          .map(org => JSON.parse(org))
+          .sort((a, b) => a.name.localeCompare(b.name, 'ko'));
+        
+        // 기관 정보 추가
+        organizations.forEach(org => {
           const option = document.createElement('option');
           option.value = org.code;
-          option.textContent = `${org.name} - ${org.code}`;
-          
-          // 이전에 선택된 값이면 선택 상태로 설정
-          if (selectedValue && selectedValue === org.code) {
-            option.selected = true;
-          }
-          
-          optGroup.appendChild(option);
+          option.textContent = org.region ? `${org.name} (${org.region})` : org.name;
+          organizationSelect.appendChild(option);
         });
         
-        organizationSelect.appendChild(optGroup);
-      });
-      
-      // 선택된 값이 있는 경우
-      if (selectedValue) {
-        // 선택한 항목으로 스크롤
-        for (let i = 0; i < organizationSelect.options.length; i++) {
-          if (organizationSelect.options[i].value === selectedValue) {
-            organizationSelect.options[i].selected = true;
-            break;
+        console.log('위원에 매칭된 기관 추가 완료:', organizations.length);
+      } else {
+        console.log('위원에 매칭된 기관이 없어 기본 기관 데이터 사용');
+        addDefaultOrganizations();
+      }
+    });
+    
+    // 위원 정보 가져오기 함수
+    function loadCommitteeData() {
+        // window.allMatchings에서 위원 정보 추출
+        if (window.allMatchings && window.allMatchings.length > 0) {
+          console.log('window.allMatchings에서 위원 정보 추출 시도');
+          const committeeSet = new Set();
+          const committeeMap = new Map(); // 위원명과 ID 매핑을 위한 맵
+          
+          window.allMatchings.forEach(match => {
+            // 영문 필드명 데이터 형식
+            if (match.committeeName) {
+              committeeSet.add(match.committeeName);
+              if (match.committeeId) {
+                committeeMap.set(match.committeeName, match.committeeId);
+              }
+            }
+            
+            // 한글 필드명 데이터 형식
+            if (match.위원명) {
+              committeeSet.add(match.위원명);
+              if (match.위원ID) {
+                committeeMap.set(match.위원명, match.위원ID);
+              }
+            }
+          });
+          
+          if (committeeSet.size > 0) {
+            console.log(`window.allMatchings에서 ${committeeSet.size}개의 위원 정보 추출 성공`);
+            
+            // 위원 정보 추가 (정렬하여 추가)
+            Array.from(committeeSet).sort((a, b) => a.localeCompare(b, 'ko')).forEach((name, index) => {
+              const option = document.createElement('option');
+              const id = committeeMap.get(name) || `C${String(index + 1).padStart(3, '0')}`;
+              
+              option.value = id;
+              option.textContent = name;
+              committeeSelect.appendChild(option);
+            });
+            
+            // 기존 일정이 있는 경우 위원 선택
+            if (window.existingScheduleToLoad) {
+              console.log('기존 일정 정보 불러오기:', window.existingScheduleToLoad);
+              
+              // 위원 ID나 위원명으로 선택
+              if (window.existingScheduleToLoad.committeeId || window.existingScheduleToLoad.committeeName) {
+                const committeeId = window.existingScheduleToLoad.committeeId || '';
+                const committeeName = window.existingScheduleToLoad.committeeName || '';
+                
+                console.log('기존 일정의 위원 정보:', committeeId, committeeName);
+                
+                // 위원 ID로 먼저 시도
+                let found = false;
+                if (committeeId) {
+                  for (let i = 0; i < committeeSelect.options.length; i++) {
+                    if (committeeSelect.options[i].value === committeeId) {
+                      committeeSelect.selectedIndex = i;
+                      console.log('위원 ID로 선택 완료:', committeeSelect.options[i].text);
+                      found = true;
+                      break;
+                    }
+                  }
+                }
+                
+                // 위원 ID로 찾지 못하면 위원명으로 시도
+                if (!found && committeeName) {
+                  for (let i = 0; i < committeeSelect.options.length; i++) {
+                    if (committeeSelect.options[i].text === committeeName) {
+                      committeeSelect.selectedIndex = i;
+                      console.log('위원명으로 선택 완료:', committeeSelect.options[i].text);
+                      found = true;
+                      break;
+                    }
+                  }
+                }
+                
+                // 위원 선택 변경 이벤트 수동 호출
+                if (found) {
+                  const changeEvent = new Event('change');
+                  committeeSelect.dispatchEvent(changeEvent);
+                }
+              }
+              
+              // 기관 정보 업데이트 후 지연을 두고 기관 선택
+              setTimeout(() => {
+                if (window.existingScheduleToLoad && (window.existingScheduleToLoad.orgCode || window.existingScheduleToLoad.organizationCode)) {
+                  const orgCode = window.existingScheduleToLoad.orgCode || window.existingScheduleToLoad.organizationCode || '';
+                  console.log('기존 일정의 기관 정보 설정:', orgCode);
+                  
+                  for (let i = 0; i < organizationSelect.options.length; i++) {
+                    if (organizationSelect.options[i].value === orgCode) {
+                      organizationSelect.selectedIndex = i;
+                      console.log('기관 선택 완료:', organizationSelect.options[i].text);
+                      break;
+                    }
+                  }
+                }
+              }, 500);
+            }
+            
+            return true; // 성공적으로 위원 정보 추출
           }
         }
-      } 
-      // 선택된 값이 없고, 일반 위원이면서 매칭된 기관이 있는 경우, 첫 번째 매칭 기관 자동 선택
-      else if (currentUser && currentUser.role !== 'master' && matchedOrgCodes.length > 0) {
-        // 첫 번째 매칭된 기관 선택
-        for (let i = 0; i < organizationSelect.options.length; i++) {
-          if (organizationSelect.options[i].value && matchedOrgCodes.includes(organizationSelect.options[i].value)) {
-            organizationSelect.options[i].selected = true;
-            console.log(`위원 ${currentUser.name}의 첫 번째 담당 기관 자동 선택: ${organizationSelect.options[i].value}`);
-            break;
-          }
+        
+        // window.allMatchings에서 위원 정보를 찾을 수 없으면 API 시도
+        if (window.api && window.api.committees && typeof window.api.committees.getMatching === 'function') {
+          console.log('API를 통해 위원 정보 가져오기 시도');
+          
+          // API 호출 시도 (비동기 함수이미로 비동기적으로 처리하고 기본 데이터 추가)
+          window.api.committees.getMatching()
+            .then(response => {
+              if (response && response.status === 'success' && response.data && response.data.matchings) {
+                // 매칭 정보 저장
+                console.log('API에서 가져온 매칭 정보 처리:', response.data.matchings.length + '개');
+                
+                // 위원 정보 추출
+                const committeeSet = new Set();
+                const committeeMap = new Map();
+                
+                response.data.matchings.forEach(item => {
+                  if (item.위원명) {
+                    committeeSet.add(item.위원명);
+                    if (item.위원ID) {
+                      committeeMap.set(item.위원명, item.위원ID);
+                    }
+                  }
+                });
+                
+                // 위원 정보 추가
+                if (committeeSet.size > 0) {
+                  // 기존 옵션 삭제
+                  committeeSelect.innerHTML = '<option value="">위원 선택</option>';
+                  
+                  Array.from(committeeSet).sort((a, b) => a.localeCompare(b, 'ko')).forEach((name, index) => {
+                    const option = document.createElement('option');
+                    const id = committeeMap.get(name) || `C${String(index + 1).padStart(3, '0')}`;
+                    
+                    option.value = id;
+                    option.textContent = name;
+                    committeeSelect.appendChild(option);
+                  });
+                  
+                  console.log(`API에서 ${committeeSet.size}개의 위원 정보 추가 완료`);
+                  
+                  // 위원 변경 시 기관 정보 업데이트 이벤트 리스너 설정
+                  committeeSelect.addEventListener('change', function() {
+                    updateOrganizationOptions();
+                  });
+                  
+                  // 기관 정보 가져오기
+                  updateOrganizationOptions();
+                  return true;
+                }
+              }
+              
+              // API에서 데이터를 가져오지 못한 경우 기본 데이터 사용
+              console.warn('API에서 위원 정보를 찾을 수 없습니다. 기본 데이터 사용');
+              addDefaultCommittees();
+              
+              // 위원 변경 시 기관 정보 업데이트 이벤트 리스너 설정
+              committeeSelect.addEventListener('change', function() {
+                updateOrganizationOptions();
+              });
+              
+              // 기관 정보 가져오기
+              updateOrganizationOptions();
+              return false;
+            })
+            .catch(error => {
+              console.error('API에서 위원 정보 가져오기 오류:', error);
+              // 기본 위원 정보 추가
+              addDefaultCommittees();
+              
+              // 위원 변경 시 기관 정보 업데이트 이벤트 리스너 설정
+              committeeSelect.addEventListener('change', function() {
+                updateOrganizationOptions();
+              });
+              
+              // 기관 정보 가져오기
+              updateOrganizationOptions();
+              return false;
+            });
+          
+          // 비동기 호출이미로 기본 데이터 추가하고 나중에 대체
+          addDefaultCommittees();
+          
+          // 위원 변경 시 기관 정보 업데이트 이벤트 리스너 설정
+          committeeSelect.addEventListener('change', function() {
+            updateOrganizationOptions();
+          });
+          
+          // 기관 정보 가져오기
+          updateOrganizationOptions();
+          return true;
+        } else {
+          console.warn('API 함수를 찾을 수 없습니다. 기본 데이터 사용');
+          // 기본 위원 정보 추가
+          addDefaultCommittees();
+          
+          // 위원 변경 시 기관 정보 업데이트 이벤트 리스너 설정
+          committeeSelect.addEventListener('change', function() {
+            updateOrganizationOptions();
+          });
+          
+          // 기관 정보 가져오기
+          updateOrganizationOptions();
+          return false;
         }
       }
       
-      console.log('기관 드롭다운 업데이트 완료');
-    } catch (error) {
-      console.error('기관 드롭다운 업데이트 중 오류:', error);
-    }
-  }
-  
-  function showDateSchedules(dateString) {
-    try {
-      // 먼저 모든 다른 모달 닫기
-      document.querySelectorAll('.modal').forEach(modal => {
-        if (modal.id !== 'schedules-list-modal') {
-          modal.style.display = 'none';
-        }
+      // 위원 정보 가져오기 실행
+      loadCommitteeData();
+      
+      // 위원 선택 이벤트 리스너 추가
+      committeeSelect.addEventListener('change', function() {
+        console.log('위원 선택 변경:', committeeSelect.value, committeeSelect.options[committeeSelect.selectedIndex]?.text);
+        updateOrganizationOptions();
       });
       
-      // 모달 요소 가져오기
-      const modal = document.getElementById('schedules-list-modal');
-      const modalTitle = document.getElementById('schedules-list-modal-title');
-      const schedulesList = document.getElementById('schedules-list');
-      
-      if (!modal || !modalTitle || !schedulesList) {
-        console.error('일정 목록 모달 요소를 찾을 수 없습니다.');
-        return;
-      }
-      
-      // 모달 제목 설정
-      modalTitle.textContent = `${dateString} 일정 목록`;
-      
-      // 일정 목록 비우기
-      schedulesList.innerHTML = '';
-      
-      // 해당 날짜의 일정 필터링
-      const dateSchedules = schedules.filter(schedule => {
-        const scheduleDate = schedule.scheduleDate || schedule.date || schedule.startDate;
-        return scheduleDate === dateString;
-      });
-      
-      // 일정이 없으면 메시지 표시
-      if (dateSchedules.length === 0) {
-        schedulesList.innerHTML = '<div class="empty-message">이 날짜에 등록된 일정이 없습니다.</div>';
-      }
-      
-      // 일정 목록 생성
-      dateSchedules.forEach(schedule => {
-        const scheduleItem = document.createElement('div');
-        scheduleItem.classList.add('schedule-item');
-        
-        // 일정 상태에 따른 스타일 추가
-        if (schedule.status === 'completed') {
-          scheduleItem.classList.add('completed');
-        } else if (schedule.status === 'pending') {
-          scheduleItem.classList.add('pending');
-        }
-        
-        // 표시할 위원 이름 결정
-        let displayCommitteeName = schedule.committeeName || '';
-        
-        // 현재 로그인 사용자와 일정의 위원 ID가 일치하면 현재 사용자 이름 사용
-        if (currentUser && schedule.committeeId === currentUser.id) {
-          displayCommitteeName = currentUser.name;
-        }
-        
-        // 일정 내용 구성
-        scheduleItem.innerHTML = `
-          <div class="schedule-title">${schedule.title || (schedule.orgName ? `${schedule.orgName} 방문 일정` : '제목 없음')}</div>
-          <div class="schedule-info">
-            <span class="committee">${displayCommitteeName}</span>
-            <span class="org">${schedule.orgName || '기관 미지정'}</span>
-          </div>
-        `;
-        
-        // 일정 클릭 이벤트
-        scheduleItem.addEventListener('click', () => {
-          // 일정 상세 정보 표시 함수 호출
-          showScheduleDetails(schedule);
+      // 기본 위원 정보 추가 함수
+      function addDefaultCommittees() {
+        ['신용기', '김수연', '문일지', '이연숙', '이정혜'].forEach((name, index) => {
+          const option = document.createElement('option');
+          option.value = `C${String(index + 1).padStart(3, '0')}`;
+          option.textContent = name;
+          committeeSelect.appendChild(option);
         });
+      }
+      
+      // 기관 정보 업데이트 함수
+      function updateOrganizationOptions() {
+        organizationSelect.innerHTML = '<option value="">기관 선택</option>';
+        const selectedCommitteeName = committeeSelect.options[committeeSelect.selectedIndex]?.text || '';
         
-        schedulesList.appendChild(scheduleItem);
-      });
+        console.log('기관 정보 가져오기 시작, 선택된 위원명:', selectedCommitteeName);
+        
+        // window.allMatchings 디버깅
+        console.log('window.allMatchings 데이터 확인:', window.allMatchings);
+        
+        // window.allMatchings에서 기관 정보 추출
+        if (window.allMatchings && Array.isArray(window.allMatchings) && window.allMatchings.length > 0) {
+          console.log('window.allMatchings에서 기관 정보 추출 시도, 데이터 개수:', window.allMatchings.length);
+          
+          // 첫 번째 항목 구조 확인
+          if (window.allMatchings.length > 0) {
+            console.log('첫 번째 매칭 데이터 구조:', JSON.stringify(window.allMatchings[0]));
+          }
+          
+          const orgSet = new Set();
+          const matchedOrgCodes = [];
+          
+          // 선택된 위원에 맞는 기관 코드 추출
+          if (selectedCommitteeName) {
+            console.log(`'${selectedCommitteeName}' 위원에 맞는 기관 코드 추출 시작`);
+            
+            // 선택된 위원의 ID 가져오기
+            const selectedCommitteeId = committeeSelect.value || '';
+            console.log(`선택된 위원 ID: ${selectedCommitteeId}`);
+            
+            window.allMatchings.forEach((match, index) => {
+              // 데이터 구조 확인
+              const committeeName = match.committeeName || match["위원명"] || '';
+              const committeeId = match.committeeId || match["위원ID"] || '';
+              const orgCode = match.orgCode || match["기관코드"] || '';
+              const orgName = match.orgName || match["기관명"] || '';
+              
+              // 디버깅 로그 줄이기
+              if (index < 5) {
+                console.log(`매칭[${index}] - 위원명: '${committeeName}', 위원ID: '${committeeId}', 기관코드: '${orgCode}', 기관명: '${orgName}'`);
+              }
+              
+              // 위원명과 위원ID 두 가지 방식으로 매칭 확인
+              const nameMatches = committeeName === selectedCommitteeName;
+              const idMatches = committeeId && selectedCommitteeId && committeeId === selectedCommitteeId;
+              
+              // 역할 확인 (신용기 위원은 주담당만 표시)
+              const role = match.role || match["역할"] || match["담당유형"] || '';
+              const isPrimaryRole = role === '주담당';
+              
+              // 모든 위원에 대해 주담당 기관만 표시
+              if ((nameMatches || idMatches) && orgCode) {
+                // 주담당인 경우만 추가
+                if (isPrimaryRole) {
+                  console.log(`주담당 매칭 발견: ${committeeName}(${committeeId}) -> ${orgCode} (${orgName})`);
+                  matchedOrgCodes.push(orgCode);
+                } else {
+                  console.log(`부담당 매칭 무시: ${committeeName}(${committeeId}) -> ${orgCode} (${orgName})`);
+                }
+              }
+              
+              // 모든 기관 정보 수집
+              if (orgCode && orgName) {
+                orgSet.add(JSON.stringify({
+                  code: orgCode,
+                  name: orgName
+                }));
+              }
+            });
+            
+            console.log(`매칭된 기관 코드 ${matchedOrgCodes.length}개:`, matchedOrgCodes);
+          } else {
+            // 위원이 선택되지 않은 경우 모든 기관 정보 수집
+            console.log('위원이 선택되지 않아 모든 기관 정보 수집');
+            window.allMatchings.forEach(match => {
+              const orgCode = match.orgCode || match["기관코드"] || '';
+              const orgName = match.orgName || match["기관명"] || '';
+              
+              if (orgCode && orgName) {
+                orgSet.add(JSON.stringify({
+                  code: orgCode,
+                  name: orgName
+                }));
+              }
+            });
+          }
+          
+          // 기관 정보 변환 및 필터링
+          const organizations = Array.from(orgSet).map(org => JSON.parse(org));
+          console.log(`총 ${organizations.length}개 기관 정보 추출됨:`, organizations);
+          
+          // 선택된 위원에 맞는 기관만 필터링
+          let filteredOrgs = organizations;
+          if (selectedCommitteeName && matchedOrgCodes.length > 0) {
+            console.log('선택된 위원에 맞는 기관만 필터링 시작');
+            filteredOrgs = organizations.filter(org => matchedOrgCodes.includes(org.code));
+            console.log(`필터링 결과: ${filteredOrgs.length}개 기관 매칭됨`);
+            
+            // 매칭된 기관이 없으면 모든 기관 표시
+            if (filteredOrgs.length === 0) {
+              console.log(`${selectedCommitteeName} 위원에게 매칭된 기관이 없어 전체 기관 표시`);
+              filteredOrgs = organizations;
+            }
+          }
+          
+          // 기관 정보 추가
+          if (filteredOrgs.length > 0) {
+            // 기관명 기준 정렬
+            filteredOrgs.sort((a, b) => a.name.localeCompare(b.name, 'ko'));
+            
+            console.log('드롭다운에 추가할 기관 목록:', filteredOrgs);
+            
+            filteredOrgs.forEach(org => {
+              const option = document.createElement('option');
+              option.value = org.code;
+              option.textContent = org.name;
+              organizationSelect.appendChild(option);
+            });
+            
+            console.log(`window.allMatchings에서 ${filteredOrgs.length}개의 기관 정보 추가 완료`);
+            return;
+          } else {
+            console.log('필터링된 기관 정보가 없음');
+          }
+        } else {
+          console.warn('window.allMatchings가 없거나 비어있음:', window.allMatchings);
+        }
+        
+        // window.allMatchings에서 기관 정보를 찾을 수 없으면 기본 데이터 사용
+        console.log('기본 기관 정보 사용');
+        addDefaultOrganizations();
+      }
       
-      // 새 일정 추가 버튼
-      const addButton = document.createElement('button');
-      addButton.classList.add('btn', 'add-schedule-btn');
-      addButton.textContent = '새 일정 추가';
-      addButton.addEventListener('click', () => {
-        modal.style.display = 'none';
-        showAddScheduleModal(dateString);
-      });
-      
-      schedulesList.appendChild(addButton);
+      // 기본 기관 정보 추가 함수
+      function addDefaultOrganizations() {
+        [
+          { code: 'ORG001', name: '서울시 노인복지관' },
+          { code: 'ORG002', name: '경기도 노인복지관' },
+          { code: 'ORG003', name: '부산시 노인복지관' },
+          { code: 'ORG004', name: '대구시 노인복지관' },
+          { code: 'ORG005', name: '인천시 노인복지관' },
+          { code: 'ORG006', name: '광주시 노인복지관' }
+        ].forEach(org => {
+          const option = document.createElement('option');
+          option.value = org.code;
+          option.textContent = org.name;
+          organizationSelect.appendChild(option);
+        });
+        console.log('기본 데이터로 6개 기관 정보 사용');
+      }
       
       // 모달 표시
-      modal.style.display = 'block';
+      setTimeout(() => {
+        modal.style.display = 'block';
+        console.log('직접 모달 표시 완료');
+      }, 0);
     } catch (error) {
-      console.error('일정 목록 표시 중 오류:', error);
-      showNotification('일정 목록을 표시하는 중 오류가 발생했습니다.', 'error');
+      console.error('전역 openScheduleFormModal 함수 오류:', error);
     }
-  }
-  
-  // 일정 상세 정보 표시 함수 추가
-  function showScheduleDetails(schedule) {
-    try {
-      // 먼저 모든 모달 닫기
-      document.querySelectorAll('.modal').forEach(modal => {
-        modal.style.display = 'none';
-      });
+  };
+
+  // 캘린더 설정 함수
+  function setupCalendar() {
+    const calendar = {};
+    
+    // 일정 상세 정보 표시 함수
+    function showScheduleDetail(scheduleId) {
+      CalendarDebugger.log(`일정 상세 정보 표시: ${scheduleId}`, 'info');
+      
+      // 일정 ID로 일정 찾기
+      const schedule = schedules.find(s => (s.id === scheduleId || s._id === scheduleId));
+      
+      if (!schedule) {
+        showNotification('일정을 찾을 수 없습니다.', 'error');
+        return;
+      }
       
       // 일정 상세 모달 요소 가져오기
       const modal = document.getElementById('schedule-detail-modal');
-      const modalTitle = document.getElementById('schedule-detail-title');
-      const detailContent = document.getElementById('schedule-detail-content');
+      const content = document.getElementById('schedule-detail-content');
+      const title = document.getElementById('schedule-detail-title');
       
-      if (!modal || !modalTitle || !detailContent) {
-        console.error('일정 상세 모달 요소를 찾을 수 없습니다.');
+      if (!modal || !content || !title) {
+        showNotification('모달 요소를 찾을 수 없습니다.', 'error');
         return;
       }
       
+      // 기관명 추출
+      let orgName = '';
+      if (schedule.organizationName) {
+        orgName = schedule.organizationName;
+      } else if (schedule.orgName) {
+        orgName = schedule.orgName;
+      } else if (schedule.orgCode || schedule.organizationCode) {
+        const orgCode = schedule.orgCode || schedule.organizationCode;
+        orgName = getOrganizationName(orgCode);
+      }
+      
+      if (!orgName || orgName === '') {
+        orgName = '기관명 미지정';
+      }
+      
+      // 위원명 추출
+      let committeeName = schedule.committeeName || '담당자 미지정';
+      
+      // 날짜 및 시간 형식화
+      const scheduleDate = schedule.scheduleDate || schedule.date || schedule.startDate || '';
+      const formattedDate = scheduleDate ? formatDate(scheduleDate) : '날짜 미지정';
+      
+      const startTime = schedule.startTime || '';
+      const endTime = schedule.endTime || '';
+      const timeInfo = startTime && endTime ? `${startTime} ~ ${endTime}` : '시간 미지정';
+      
+      // 상태 텍스트 및 색상 설정
+      let statusText = '';
+      let statusColor = '';
+      
+      switch (schedule.status) {
+        case 'completed':
+          statusText = '완료';
+          statusColor = '#4caf50';
+          break;
+        case 'pending':
+          statusText = '대기중';
+          statusColor = '#ffc107';
+          break;
+        case 'canceled':
+          statusText = '취소됨';
+          statusColor = '#f44336';
+          break;
+        default:
+          statusText = '예정됨';
+          statusColor = '#3498db';
+      }
+      
       // 모달 제목 설정
-      modalTitle.textContent = schedule.title || (schedule.orgName ? `${schedule.orgName} 방문 일정` : '제목 없음');
+      title.textContent = schedule.title || (orgName ? `${orgName} 방문` : '일정 상세');
       
-      // 일정 상세 내용 구성
-      let statusText = '대기중';
-      let statusClass = 'pending';
-      
-      if (schedule.status === 'completed') {
-        statusText = '완료됨';
-        statusClass = 'completed';
-      } else if (schedule.status === 'canceled') {
-        statusText = '취소됨';
-        statusClass = 'canceled';
-      }
-      
-      // 표시할 위원 이름 결정
-      let displayCommitteeName = schedule.committeeName || '';
-      
-      // 현재 로그인 사용자와 일정의 위원 ID가 일치하면 현재 사용자 이름 사용
-      if (currentUser && schedule.committeeId === currentUser.id) {
-        displayCommitteeName = currentUser.name;
-      }
-      
-      // 상세 내용 HTML 구성
-      detailContent.innerHTML = `
-        <div class="detail-row">
-          <div class="detail-label">일정 날짜:</div>
-          <div class="detail-value">${schedule.scheduleDate || schedule.date || schedule.startDate || '날짜 정보 없음'}</div>
+      // 모달 내용 설정
+      content.innerHTML = `
+        <div class="schedule-detail-info">
+          <div class="detail-row">
+            <span class="detail-label">상태:</span>
+            <span class="detail-value" style="color: ${statusColor}; font-weight: bold;">${statusText}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">담당 위원:</span>
+            <span class="detail-value">${committeeName}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">방문 기관:</span>
+            <span class="detail-value">${orgName}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">날짜:</span>
+            <span class="detail-value">${formattedDate}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">시간:</span>
+            <span class="detail-value">${timeInfo}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">메모:</span>
+            <span class="detail-value">${schedule.notes || '메모 없음'}</span>
+          </div>
         </div>
-        <div class="detail-row">
-          <div class="detail-label">담당 위원:</div>
-          <div class="detail-value committee-name" style="color: ${schedule.color || defaultColor};">${displayCommitteeName || '위원 정보 없음'}</div>
-        </div>
-        <div class="detail-row">
-          <div class="detail-label">담당 기관:</div>
-          <div class="detail-value">${schedule.orgName || '기관 정보 없음'}</div>
-        </div>
-        <div class="detail-row">
-          <div class="detail-label">상태:</div>
-          <div class="detail-value status ${statusClass}">${statusText}</div>
-        </div>
-        <div class="detail-row">
-          <div class="detail-label">설명:</div>
-          <div class="detail-value description">${schedule.description || '설명 없음'}</div>
+        <div class="detail-actions">
+          <button class="btn btn-primary" id="edit-schedule-btn">수정</button>
+          <button class="btn btn-danger" id="delete-schedule-btn">삭제</button>
         </div>
       `;
       
-      // 수정/삭제 버튼 추가
-      const buttonsContainer = document.createElement('div');
-      buttonsContainer.classList.add('detail-buttons');
-      
-      // 상태 변경 버튼
-      const statusButton = document.createElement('button');
-      statusButton.classList.add('btn', 'status-btn');
-      
-      if (schedule.status === 'pending') {
-        statusButton.textContent = '완료로 변경';
-        statusButton.classList.add('complete-btn');
-        statusButton.addEventListener('click', () => updateScheduleStatus(schedule.id, 'completed'));
-      } else if (schedule.status === 'completed') {
-        statusButton.textContent = '대기로 변경';
-        statusButton.classList.add('pending-btn');
-        statusButton.addEventListener('click', () => updateScheduleStatus(schedule.id, 'pending'));
+      // 수정 버튼 이벤트 리스너
+      const editBtn = content.querySelector('#edit-schedule-btn');
+      if (editBtn) {
+        editBtn.addEventListener('click', () => {
+          modal.style.display = 'none';
+          const dateString = schedule.scheduleDate || schedule.date || schedule.startDate;
+          openScheduleFormModal(dateString, scheduleId);
+        });
       }
       
-      // 수정 버튼
-      const editButton = document.createElement('button');
-      editButton.textContent = '수정';
-      editButton.classList.add('btn', 'edit-btn');
-      editButton.addEventListener('click', () => {
-        // 먼저 현재 모달 닫기
-        modal.style.display = 'none';
-        // 수정 모달 표시
-        showEditScheduleModal(schedule);
-      });
+      // 삭제 버튼 이벤트 리스너
+      const deleteBtn = content.querySelector('#delete-schedule-btn');
+      if (deleteBtn) {
+        deleteBtn.addEventListener('click', () => {
+          if (confirm('이 일정을 삭제하시겠습니까?')) {
+            // 일정 삭제 로직
+            const index = schedules.findIndex(s => (s.id === scheduleId || s._id === scheduleId));
+            if (index !== -1) {
+              schedules.splice(index, 1);
+              saveSchedulesToLocalStorage();
+              renderCalendar(currentYear, currentMonth);
+              showNotification('일정이 삭제되었습니다.', 'success');
+              modal.style.display = 'none';
+            }
+          }
+        });
+      }
       
-      // 삭제 버튼
-      const deleteButton = document.createElement('button');
-      deleteButton.textContent = '삭제';
-      deleteButton.classList.add('btn', 'delete-btn');
-      deleteButton.addEventListener('click', () => {
-        if (confirm('정말 이 일정을 삭제하시겠습니까?')) {
-          deleteSchedule(schedule.id);
+      // 모달 닫기 버튼 이벤트 리스너
+      const closeBtn = modal.querySelector('.close-modal');
+      if (closeBtn) {
+        closeBtn.addEventListener('click', () => {
+          modal.style.display = 'none';
+        });
+      }
+      
+      // 모달 외부 클릭 시 닫기
+      window.addEventListener('click', (e) => {
+        if (e.target === modal) {
           modal.style.display = 'none';
         }
       });
       
-      buttonsContainer.appendChild(statusButton);
-      buttonsContainer.appendChild(editButton);
-      buttonsContainer.appendChild(deleteButton);
-      
-      detailContent.appendChild(buttonsContainer);
-      
       // 모달 표시
       modal.style.display = 'block';
-    } catch (error) {
-      console.error('일정 상세 정보 표시 중 오류:', error);
-      showNotification('일정 상세 정보를 표시하는 중 오류가 발생했습니다.', 'error');
     }
-  }
-  
-  // 일정 상태 업데이트 함수
-  async function updateScheduleStatus(scheduleId, newStatus) {
-    try {
-      // 해당 일정 찾기
-      const scheduleIndex = schedules.findIndex(s => s.id == scheduleId);
-      if (scheduleIndex === -1) {
-        console.error('일정을 찾을 수 없습니다:', scheduleId);
-        showNotification('일정을 찾을 수 없습니다.', 'error');
-        return;
+
+    // 기관명 가져오기 함수
+    function getOrganizationName(orgCode) {
+      if (!orgCode) return '알 수 없는 기관';
+      
+      if (organizationMap[orgCode]) {
+        return organizationMap[orgCode];
       }
       
-      // API 호출
-      const response = await fetch(`/api/schedules/${scheduleId}/status`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ status: newStatus })
-      }).catch(err => {
-        console.warn('API 호출 실패, 로컬 데이터만 업데이트:', err);
-        return { ok: false };
-      });
+      const org = organizations.find(org => org.code === orgCode || org.id === orgCode);
       
-      // 로컬 데이터 업데이트
-      schedules[scheduleIndex].status = newStatus;
-      
-      // 모달 닫기
-      document.getElementById('schedule-detail-modal').style.display = 'none';
-      
-      // 달력 업데이트
-      renderCalendar(currentDate);
-      
-      // 로컬 스토리지에 백업
-      saveSchedulesToLocalStorage();
-      
-      // 일정 변경 이벤트 발생
-      if (typeof notifyScheduleUpdated === 'function') {
-        notifyScheduleUpdated('update', schedules[scheduleIndex]);
+      if (org && org.name) {
+        organizationMap[orgCode] = org.name;
+        return org.name;
       }
       
-      // 결과 메시지
-      if (response.ok) {
-        console.log('일정 상태 업데이트 성공');
-        showNotification('일정 상태가 업데이트되었습니다.', 'success');
-      } else {
-        console.warn('API 호출은 실패했지만, 로컬 데이터는 업데이트되었습니다.');
-        showNotification('서버 연결에 문제가 있지만, 화면에는 반영되었습니다.', 'warning');
-      }
-    } catch (error) {
-      console.error('일정 상태 업데이트 중 오류:', error);
-      showNotification('일정 상태를 업데이트하는 중 오류가 발생했습니다.', 'error');
-    }
-  }
-  
-  // 일정 삭제 함수
-  async function deleteSchedule(scheduleId) {
-    try {
-      // 해당 일정 찾기
-      const scheduleIndex = schedules.findIndex(s => s.id == scheduleId);
-      if (scheduleIndex === -1) {
-        console.error('일정을 찾을 수 없습니다:', scheduleId);
-        showNotification('일정을 찾을 수 없습니다.', 'error');
-        return;
-      }
-      
-      // 일정 정보 저장
-      const deletedSchedule = {...schedules[scheduleIndex]};
-      
-      // 데이터 형식 통일
-      deletedSchedule.date = deletedSchedule.scheduleDate || deletedSchedule.visitDate || deletedSchedule.date;
-      deletedSchedule.visitDate = deletedSchedule.scheduleDate || deletedSchedule.visitDate || deletedSchedule.date;
-      
-      // API 호출
-      const response = await fetch(`/api/schedules/${scheduleId}`, {
-        method: 'DELETE'
-      }).catch(err => {
-        console.warn('API 호출 실패, 로컬 데이터만 업데이트:', err);
-        return { ok: false };
-      });
-      
-      // 로컬 데이터에서 제거
-      schedules.splice(scheduleIndex, 1);
-      
-      // 모든 모달 닫기
-      document.querySelectorAll('.modal').forEach(modal => {
-        modal.style.display = 'none';
-      });
-      
-      // 달력 업데이트
-      renderCalendar(currentDate);
-      
-      // 로컬 스토리지에 백업
-      saveSchedulesToLocalStorage();
-      
-      // 일정 변경 이벤트 발생
-      if (typeof notifyScheduleUpdated === 'function') {
-        notifyScheduleUpdated('delete', deletedSchedule);
-      }
-      
-      // 마스터 대시보드 데이터 업데이트 이벤트 발생
-      if (currentUser && currentUser.role === 'master') {
-        console.log('마스터 대시보드 일정 데이터 업데이트 이벤트 발생');
-        document.dispatchEvent(new CustomEvent('masterDashboardDataUpdated', {
-          detail: { type: 'delete', data: deletedSchedule }
-        }));
-      }
-      
-      // 결과 메시지
-      if (response.ok) {
-        console.log('일정 삭제 성공');
-        showNotification('일정이 삭제되었습니다.', 'success');
-      } else {
-        console.warn('API 호출은 실패했지만, 로컬 데이터는 업데이트되었습니다.');
-        showNotification('서버 연결에 문제가 있지만, 화면에는 반영되었습니다.', 'warning');
-      }
-    } catch (error) {
-      console.error('일정 삭제 중 오류:', error);
-      showNotification('일정을 삭제하는 중 오류가 발생했습니다.', 'error');
-    }
-  }
-  
-  // 일정 수정 모달 표시 함수
-  function showEditScheduleModal(schedule) {
-    try {
-      // 모든 모달 닫기
-      document.querySelectorAll('.modal').forEach(modal => {
-        modal.style.display = 'none';
-      });
-      
-      // 모달 초기화
-      const modal = document.getElementById('schedule-form-modal');
-      const modalTitle = document.getElementById('schedule-form-title');
-      const form = document.getElementById('schedule-form');
-      const saveButton = document.getElementById('save-schedule-btn');
-      
-      if (!modal || !modalTitle || !form || !saveButton) {
-        console.error('일정 수정 모달 요소를 찾을 수 없습니다.');
-        return;
-      }
-      
-      // 모달 제목 설정
-      modalTitle.textContent = `일정 수정: ${schedule.title || (schedule.orgName ? `${schedule.orgName} 방문 일정` : '제목 없음')}`;
-      
-      // 양식 초기값 설정
-      const scheduleId = document.getElementById('schedule-id');
-      const scheduleDate = document.getElementById('schedule-date');
-      const scheduleCommittee = document.getElementById('schedule-committee');
-      const scheduleOrganization = document.getElementById('schedule-organization');
-      const scheduleStartTime = document.getElementById('schedule-start-time');
-      const scheduleEndTime = document.getElementById('schedule-end-time');
-      const scheduleNotes = document.getElementById('schedule-notes');
-      
-      // 필드에 데이터 설정
-      if (scheduleId) scheduleId.value = schedule.id || '';
-      if (scheduleDate) scheduleDate.value = schedule.scheduleDate || schedule.date || schedule.startDate || '';
-      if (scheduleCommittee) scheduleCommittee.value = schedule.committeeId || '';
-      if (scheduleOrganization) scheduleOrganization.value = schedule.orgCode || '';
-      
-      // 시간 데이터 설정 (있는 경우)
-      if (scheduleStartTime && schedule.startTime) scheduleStartTime.value = schedule.startTime;
-      if (scheduleEndTime && schedule.endTime) scheduleEndTime.value = schedule.endTime;
-      
-      // 메모 설정
-      if (scheduleNotes) scheduleNotes.value = schedule.description || schedule.notes || '';
-      
-      // 제출 버튼 텍스트 변경
-      saveButton.textContent = '일정 수정';
-      
-      // 저장 버튼 이벤트 설정
-      // 기존 이벤트 리스너 제거
-      const newSaveButton = saveButton.cloneNode(true);
-      saveButton.parentNode.replaceChild(newSaveButton, saveButton);
-      
-      // 새 이벤트 리스너 추가
-      newSaveButton.addEventListener('click', async () => {
-        await updateSchedule();
-      });
-      
-      // 드롭다운 업데이트
-      updateCommitteeDropdown();
-      updateOrganizationDropdown();
-      
-      // 모달 표시
-      modal.style.display = 'block';
-    } catch (error) {
-      console.error('일정 수정 모달 표시 중 오류:', error);
-      showNotification('일정 수정 모달을 표시하는 중 오류가 발생했습니다.', 'error');
-    }
-  }
-  
-  // 일정 업데이트 함수
-  async function updateSchedule() {
-    try {
-      const form = document.getElementById('schedule-form');
-      const scheduleId = document.getElementById('schedule-id').value;
-      
-      if (!scheduleId) {
-        showNotification('일정 ID가 유효하지 않습니다.', 'error');
-        return;
-      }
-      
-      // 필수 필드 값 가져오기
-      const scheduleDate = document.getElementById('schedule-date').value;
-      const committeeId = document.getElementById('schedule-committee').value;
-      const orgCode = document.getElementById('schedule-organization').value;
-      const startTime = document.getElementById('schedule-start-time').value;
-      const endTime = document.getElementById('schedule-end-time').value;
-      const notes = document.getElementById('schedule-notes').value;
-      
-      // 필수 필드 검증
-      if (!scheduleDate || !committeeId || !orgCode) {
-        showNotification('모든 필수 필드를 입력해주세요.', 'error');
-        return;
-      }
-      
-      // 위원 목록에서 이름 가져오기
-      const committeeSelect = document.getElementById('schedule-committee');
-      const committeeName = committeeSelect.options[committeeSelect.selectedIndex].text;
-      
-      // 기관 목록에서 이름 가져오기
-      const orgSelect = document.getElementById('schedule-organization');
-      const orgIndex = orgSelect.selectedIndex;
-      
-      if (orgIndex === -1) {
-        showNotification('기관 선택이 올바르지 않습니다.', 'error');
-        return;
-      }
-      
-      // 선택된 기관 정보 가져오기
-      const orgText = orgSelect.options[orgIndex].text;
-      const orgData = orgText.split(' - ');
-      const organization = await fetchOrganizationByCode(orgCode);
-      
-      if (!organization) {
-        showNotification('선택된 기관 정보를 찾을 수 없습니다.', 'error');
-        return;
-      }
-      
-      console.log('업데이트할 일정 데이터:', { 
-        committeeId, 
-        committeeName,
-        orgCode,
-        orgName: organization.name
-      });
-      
-      // 위원별 색상도 포함
-      const color = getCommitteeColor(committeeId);
-      
-      // 업데이트 데이터 구성
-      const updateData = {
-        committeeId: committeeId,
-        committeeName: committeeName,
-        orgCode: orgCode,
-        orgName: organization.name,
-        visitDate: scheduleDate,
-        startTime: startTime,
-        endTime: endTime,
-        notes: notes || '',
-        color: color // 색상 정보 추가
+      const orgMapping = {
+        'A48240002': '한국지능정보사회진흥원',
+        'A48240001': '과학기술정보통신부',
+        'B48240001': '국가정보자원관리원',
+        'C48240001': '한국인터넷진흥원'
       };
       
-      // 일정 인덱스 찾기
-      const scheduleIndex = schedules.findIndex(s => s.id === scheduleId);
-      
-      if (scheduleIndex === -1) {
-        showNotification('해당 일정을 찾을 수 없습니다.', 'error');
-        return;
+      if (orgMapping[orgCode]) {
+        organizationMap[orgCode] = orgMapping[orgCode];
+        return orgMapping[orgCode];
       }
       
-      // 기존 일정 데이터 백업
-      const originalSchedule = { ...schedules[scheduleIndex] };
+      return `기관(${orgCode})`;
+    }
+
+    // 위원 이름 매핑 함수
+    function mapCommitteeName(originalName) {
+      if (!originalName) return '';
       
-      // 로컬 데이터 업데이트
-      schedules[scheduleIndex] = {
-        ...schedules[scheduleIndex],
-        committeeId: committeeId,
-        orgCode: orgCode,
-        committeeName: committeeName,
-        orgName: organization.name,
-        scheduleDate: scheduleDate,
-        startTime: startTime,
-        endTime: endTime,
-        notes: notes || '',
-        title: `${organization.name} 방문 일정`,
-        color: color // 색상 정보 추가
-      };
+      if (committeeMap[originalName]) {
+        return committeeMap[originalName];
+      }
       
-      // 모든 모달 닫기
-      document.querySelectorAll('.modal').forEach(modal => {
-        modal.style.display = 'none';
-      });
-      
-      // 달력 업데이트
-      renderCalendar(currentDate);
-      
-      // 로컬 스토리지에 저장
-      saveSchedulesToLocalStorage();
-      
-      // API 호출로 서버 업데이트
+      return originalName;
+    }
+
+    // 위원-기관 매칭 정보 가져오기 함수
+    async function loadCommitteeMatchings() {
       try {
-        const response = await fetch(`/api/schedules/${scheduleId}`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(updateData)
-        }).catch(err => {
-          console.warn('API 호출 실패, 로컬 데이터만 업데이트:', err);
-          return { ok: false };
-        });
+        console.log('위원-기관 매칭 정보 가져오기 시도');
         
-        if (response.ok) {
-          console.log('일정 업데이트 성공');
-          showNotification('일정이 업데이트되었습니다.', 'success');
-        } else {
-          console.warn('API 호출은 실패했지만, 로컬 데이터는 업데이트되었습니다.');
-          showNotification('서버 연결에 문제가 있지만, 화면에는 반영되었습니다.', 'warning');
-        }
-        
-        // 일정 변경 이벤트 발생
-        if (typeof notifyScheduleUpdated === 'function') {
-          notifyScheduleUpdated('update', schedules[scheduleIndex]);
-        }
-        
-        // 마스터 대시보드 데이터 업데이트 이벤트 발생
-        if (currentUser && currentUser.role === 'master') {
-          console.log('마스터 대시보드 일정 데이터 업데이트 이벤트 발생 (업데이트)');
-          document.dispatchEvent(new CustomEvent('masterDashboardDataUpdated', {
-            detail: { type: 'update', data: schedules[scheduleIndex] }
-          }));
-        }
-      } catch (error) {
-        console.error('서버 업데이트 중 오류:', error);
-        showNotification('서버 통신 중 오류가 발생했지만, 화면에는 반영되었습니다.', 'warning');
-      }
-    } catch (error) {
-      console.error('일정 업데이트 중 오류:', error);
-      showNotification('일정을 업데이트하는 중 오류가 발생했습니다.', 'error');
-    }
-  }
-  
-  async function addSchedule() {
-    try {
-      const form = document.getElementById('schedule-form');
-      
-      // 필수 필드 값 가져오기
-      const scheduleDate = document.getElementById('schedule-date').value;
-      const committeeId = document.getElementById('schedule-committee').value;
-      const orgCode = document.getElementById('schedule-organization').value;
-      const startTime = document.getElementById('schedule-start-time').value;
-      const endTime = document.getElementById('schedule-end-time').value;
-      const notes = document.getElementById('schedule-notes').value;
-      
-      // 필수 필드 검증
-      if (!scheduleDate || !committeeId || !orgCode) {
-        showNotification('모든 필수 필드를 입력해주세요.', 'error');
-        return;
-      }
-      
-      // 클라이언트 전용 데이터 (UI 표시용)
-      const localData = {
-        scheduleDate: scheduleDate,
-        startTime: startTime,
-        endTime: endTime,
-        committeeId: committeeId,
-        orgCode: orgCode,
-        description: notes || '',
-        status: 'pending'
-      }
-      
-      // 현재 로그인한 사용자 정보 확인 (currentUser 사용)
-      if (currentUser && committeeId === currentUser.id) {
-        localData.committeeName = currentUser.name;
-        console.log(`로그인 사용자 이름으로 설정: ${localData.committeeName}`);
-      } else {
-        // 선택된 다른 위원인 경우 위원 목록에서 찾기
-        const committee = committees.find(c => c.id === committeeId);
-        if (committee) {
-          // 위원 이름이 '모니터링위원N' 형식인 경우 실제 이름으로 변환
-          localData.committeeName = mapCommitteeName(committee.name);
-          console.log(`위원 목록에서 이름 찾음: ${localData.committeeName}`);
-        } else {
-          console.warn(`위원 ID ${committeeId}에 해당하는 위원을 찾을 수 없습니다`);
-        }
-      }
-      
-      // 기관 이름 설정
-      const organization = organizations.find(o => o.code === orgCode);
-      if (organization) {
-        localData.orgName = organization.name;
-        localData.title = `${organization.name} 방문 일정`;
-      } else {
-        localData.title = `${orgCode} 방문 일정`;
-      }
-      
-      console.log('최종 일정 데이터:', { 
-        committeeId, 
-        committeeName: localData.committeeName,
-        orgCode,
-        orgName: localData.orgName
-      });
-      
-      // 위원별 색상 추가
-      localData.color = getCommitteeColor(committeeId);
-      
-      // 서버로 전송할 API 요청 데이터 구성 (서버 API 형식에 맞춤)
-      const requestData = {
-        committeeId: committeeId,
-        committeeName: localData.committeeName, // 로그인한 사용자 이름 또는 매핑된 실제 이름
-        orgCode: orgCode,
-        orgName: localData.orgName, // 기관 이름도 명시적으로 전송
-        visitDate: scheduleDate,
-        startTime: startTime,
-        endTime: endTime,
-        notes: notes || '',
-        title: localData.title, // 제목 필드 추가
-        color: localData.color // 색상 정보 추가
-      };
-      
-      console.log('일정 추가 요청 데이터:', requestData);
-      
-      // API 호출
-      const response = await fetch('/api/schedules', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(requestData)
-      }).catch(err => {
-        console.warn('API 호출 실패, 로컬 데이터만 업데이트:', err);
-        return { ok: false, status: 503 };
-      });
-      
-      // 서버 응답 처리
-      let newScheduleId;
-      let apiSuccess = false;
-      
-      if (response.ok) {
-        try {
-          const result = await response.json();
-          console.log('일정 추가 성공:', result);
-          newScheduleId = result.data?.schedule?.id;
-          apiSuccess = true;
-        } catch (err) {
-          console.warn('API 응답 처리 오류:', err);
-          newScheduleId = `local_${Date.now()}`;
-        }
-      } else {
-        console.warn('API 호출 실패 상태:', response.status);
-        newScheduleId = `local_${Date.now()}`;
-      }
-      
-      // 일정 배열에 추가 (서버에서 반환된 ID 사용 또는 임시 ID 생성)
-      const newSchedule = {
-        ...localData,
-        id: newScheduleId
-      };
-      schedules.push(newSchedule);
-      
-      // 모달 닫기
-      document.getElementById('schedule-form-modal').style.display = 'none';
-      
-      // 달력 업데이트
-      renderCalendar(currentDate);
-      
-      // 로컬 스토리지에 백업
-      saveSchedulesToLocalStorage();
-      
-      // 일정 변경 이벤트 발생
-      if (typeof notifyReportUpdate === 'function') {
-        notifyReportUpdate('add', {
-          id: newSchedule.id,
-          committeeId: committeeId,
-          committeeName: committee ? committee.name : '',
-          orgCode: orgCode,
-          orgName: organization ? organization.name : '',
-          date: scheduleDate,
-          visitDate: scheduleDate,
-          scheduleDate: scheduleDate,
-          startTime: startTime,
-          endTime: endTime,
-          notes: notes || '',
-          title: localData.title, // 제목 필드 추가
-          color: localData.color // 색상 정보 추가
-        });
-      }
-      
-      // 마스터 대시보드 데이터 업데이트 이벤트 발생
-      if (currentUser && currentUser.role === 'master') {
-        console.log('마스터 대시보드 일정 데이터 업데이트 이벤트 발생 (일정 추가)');
-        document.dispatchEvent(new CustomEvent('masterDashboardDataUpdated', {
-          detail: { type: 'add', data: newSchedule }
-        }));
-      }
-      
-      if (apiSuccess) {
-        showNotification('일정이 추가되었습니다.', 'success');
-      } else {
-        showNotification('서버 연결에 문제가 있지만, 화면에는 반영되었습니다. 페이지를 새로고침하지 마세요.', 'warning');
-      }
-    } catch (error) {
-      console.error('일정 추가 중 오류:', error);
-      showNotification('일정을 추가하는 중 오류가 발생했습니다.', 'error');
-    }
-  }
-  
-  // 로컬 스토리지 관련 함수 개선
-  function saveSchedulesToLocalStorage() {
-    try {
-      const schedulesJson = JSON.stringify(schedules);
-      localStorage.setItem(LOCAL_STORAGE_SCHEDULES_KEY, schedulesJson);
-      localStorage.setItem(LOCAL_STORAGE_LAST_UPDATE_KEY, new Date().toISOString());
-      console.log(`일정 데이터 로컬 스토리지 저장 완료: ${schedules.length}개`);
-      
-      // 전역 객체에 일정 데이터 백업
-      window.calendarSchedules = schedules;
-      return true;
-    } catch (error) {
-      console.error('일정 데이터 로컬 스토리지 저장 오류:', error);
-      return false;
-    }
-  }
-  
-  function restoreSchedulesFromLocalStorage() {
-    try {
-      // 전역 객체에서 먼저 확인
-      if (window.calendarSchedules && window.calendarSchedules.length > 0) {
-        console.log(`전역 객체에서 일정 데이터 복원: ${window.calendarSchedules.length}개`);
-        schedules = window.calendarSchedules;
-        return true;
-      }
-      
-      // 로컬 스토리지에서 확인
-      const storedSchedules = localStorage.getItem(LOCAL_STORAGE_SCHEDULES_KEY);
-      const lastUpdate = localStorage.getItem(LOCAL_STORAGE_LAST_UPDATE_KEY);
-      
-      if (storedSchedules) {
-        const parsedSchedules = JSON.parse(storedSchedules);
-        
-        // 로컬 스토리지에 유효한 데이터가 있는 경우
-        if (parsedSchedules && parsedSchedules.length > 0) {
-          console.log(`로컬 스토리지에서 일정 데이터 복원: ${parsedSchedules.length}개 (마지막 업데이트: ${lastUpdate || '알 수 없음'})`);
-          schedules = parsedSchedules;
+        // 이미 매칭 정보가 있는지 확인
+        if (window.allMatchings && Array.isArray(window.allMatchings) && window.allMatchings.length > 0) {
+          console.log('이미 매칭 정보가 로드되어 있습니다:', window.allMatchings.length + '개');
           
-          // 전역 객체에도 저장
-          window.calendarSchedules = parsedSchedules;
-          return true;
-        }
-      }
-      
-      console.log('로컬 스토리지에 유효한 일정 데이터가 없습니다.');
-      return false;
-    } catch (error) {
-      console.error('일정 데이터 로컬 스토리지 복원 오류:', error);
-      return false;
-    }
-  }
-  
-  // 일정 데이터가 서버로 전송된 후 종합보고서에 알림
-  async function notifyReportUpdate(type, scheduleData) {
-    try {
-      // common.js의 notifyScheduleUpdated 함수 사용
-      if (typeof notifyScheduleUpdated === 'function') {
-        notifyScheduleUpdated(type, scheduleData);
-        console.log(`일정 ${type} 이벤트 발생: 알림 성공`);
-      } else {
-        // 함수가 없으면 커스텀 이벤트 직접 발생
-        console.log(`notifyScheduleUpdated 함수를 찾을 수 없어 직접 이벤트 발생`);
-        const event = new CustomEvent('scheduleUpdated', {
-          detail: {
-            type: type,
-            data: scheduleData
-          }
-        });
-        window.dispatchEvent(event);
-      }
-      
-      return true;
-    } catch (error) {
-      console.error('일정 이벤트 알림 중 오류:', error);
-      return false;
-    }
-  }
-  
-  // 특정 날짜로 이동하는 함수 추가
-  function goToCalendarDate(dateString) {
-    try {
-      if (!dateString) {
-        console.error('날짜 문자열이 제공되지 않았습니다.');
-        return;
-      }
-      
-      console.log(`날짜 이동 시도: ${dateString}`);
-      
-      // 날짜 문자열 파싱 (YYYY-MM-DD 형식)
-      const parts = dateString.split('-');
-      if (parts.length !== 3) {
-        console.error('잘못된 날짜 형식:', dateString);
-        return;
-      }
-      
-      // 날짜 객체 생성 (월은 0-based이므로 1 감소)
-      const year = parseInt(parts[0], 10);
-      const month = parseInt(parts[1], 10) - 1; // 0-based month
-      const day = parseInt(parts[2], 10);
-      
-      // 유효한 날짜인지 확인
-      if (isNaN(year) || isNaN(month) || isNaN(day)) {
-        console.error('날짜 변환 오류:', dateString);
-        return;
-      }
-      
-      // 해당 월로 이동
-      currentDate = new Date(year, month, 1);
-      renderCalendar(currentDate);
-      
-      // 해당 날짜에 시각적 표시 추가 (선택 효과)
-      setTimeout(() => {
-        const targetCell = document.querySelector(`.calendar-cell[data-date="${dateString}"]`);
-        if (targetCell) {
-          // 셀에 특별한 스타일 적용
-          targetCell.classList.add('target-date');
+          // 원본 데이터 보존을 위해 참조 복사
+          committeeOrgMatchings = window.allMatchings;
           
-          // 셀로 스크롤
-          targetCell.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          
-          // 강조 효과를 잠시 후 제거
-          setTimeout(() => {
-            targetCell.classList.remove('target-date');
-          }, 3000);
-          
-          // 보고서에서 왔다면 해당 날짜의 일정 목록 표시
-          if (localStorage.getItem('calendar_from_report') === 'true') {
-            showDateSchedules(dateString);
-            localStorage.removeItem('calendar_from_report');
-          }
-        }
-      }, 300);
-      
-      console.log(`날짜 이동 완료: ${year}년 ${month + 1}월 ${day}일`);
-    } catch (error) {
-      console.error('날짜 이동 중 오류:', error);
-    }
-  }
-  
-  // 달력 스타일 동적 추가
-  function addCalendarStyles() {
-    // 이미 스타일이 추가되어 있는지 확인
-    if (document.getElementById('calendar-dynamic-styles')) {
-      return;
-    }
-    
-    // 스타일 요소 생성
-    const styleElement = document.createElement('style');
-    styleElement.id = 'calendar-dynamic-styles';
-    
-    // 스타일 정의
-    styleElement.textContent = `
-      .calendar-cell.target-date {
-        animation: pulse-highlight 2s;
-        box-shadow: 0 0 0 2px #3b82f6;
-        position: relative;
-        z-index: 2;
-      }
-      
-      @keyframes pulse-highlight {
-        0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
-        70% { box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
-      }
-      
-      /* 일정 관련 스타일 */
-      .event {
-        border-radius: 3px;
-        padding: 2px 4px;
-        margin-bottom: 3px;
-        font-size: 0.75rem;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        white-space: nowrap;
-        overflow: hidden;
-        position: relative;
-        background-color: rgba(255, 255, 255, 0.9);
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
-      }
-      
-      .event:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
-        z-index: 5;
-      }
-      
-      .event.my-event {
-        background-color: rgba(240, 249, 255, 0.95);
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-      }
-      
-      .event-title {
-        max-width: 70%;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        z-index: 1;
-        position: relative;
-      }
-      
-      .event-committee {
-        color: #666;
-        z-index: 1;
-        position: relative;
-        border-radius: 3px;
-        padding: 0 3px;
-        font-size: 0.7rem;
-      }
-      
-      .committee-indicator {
-        position: absolute;
-        right: 4px;
-        top: 50%;
-        transform: translateY(-50%);
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        opacity: 0.9;
-        box-shadow: 0 0 2px rgba(0,0,0,0.2);
-      }
-      
-      /* 일정 목록 스타일 */
-      .schedule-item {
-        border-radius: 4px;
-        padding: 8px 10px;
-        margin-bottom: 8px;
-        background-color: #f9f9f9;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        transition: all 0.2s ease;
-      }
-      
-      .schedule-item:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 2px 5px rgba(0,0,0,0.15);
-      }
-      
-      .schedule-item.my-schedule {
-        background-color: #f0f9ff;
-      }
-      
-      /* 일정 상태 관련 스타일 */
-      .completed {
-        opacity: 0.7;
-      }
-      
-      .pending {
-        font-weight: normal;
-      }
-      
-      /* 색상 구분 레전드 (범례) */
-      #committee-color-legend {
-        margin-top: 10px;
-        padding: 10px;
-        border-radius: 6px;
-        background-color: #f0f7ff;
-        border: 1px solid #d1e3fa;
-        display: flex;
-        flex-direction: column;
-      }
-      
-      .legend-items-container {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-      }
-      
-      .legend-title {
-        margin-right: 15px;
-        margin-bottom: 8px;
-        font-weight: bold;
-        font-size: 0.9rem;
-        color: #1e40af;
-      }
-      
-      .legend-item {
-        display: flex;
-        align-items: center;
-        margin-right: 12px;
-        margin-bottom: 4px;
-        font-size: 0.8rem;
-        padding: 4px 8px;
-        border-radius: 4px;
-      }
-      
-      .legend-item.current-user {
-        background-color: #e0f2fe;
-        font-weight: bold;
-      }
-      
-      .color-box {
-        width: 16px;
-        height: 16px;
-        margin-right: 8px;
-        display: inline-block;
-        border-radius: 3px;
-        border: 1px solid rgba(0,0,0,0.1);
-        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
-      }
-      
-      .color-sample {
-        margin-left: 5px;
-        padding: 2px 8px;
-        border-radius: 2px;
-        font-size: 0.7rem;
-        color: #444;
-      }
-    `;
-    
-    // 문서 헤드에 스타일 요소 추가
-    document.head.appendChild(styleElement);
-    console.log('캘린더 동적 스타일 추가 완료');
-    
-    // 범례(레전드) 추가
-    addCommitteeLegend();
-  }
-  
-  // 위원별 색상 범례(레전드) 추가
-  function addCommitteeLegend() {
-    setTimeout(() => {
-      // 캘린더 상단에 범례 추가
-      const calendarHeader = document.querySelector('.calendar-header');
-      if (!calendarHeader) return;
-      
-      // 기존 범례 있으면 제거
-      const existingLegend = document.getElementById('committee-color-legend');
-      if (existingLegend) existingLegend.remove();
-      
-      // 범례 컨테이너 생성
-      const legend = document.createElement('div');
-      legend.id = 'committee-color-legend';
-      
-      // 범례 제목
-      const legendTitle = document.createElement('div');
-      legendTitle.textContent = '위원별 색상 구분';
-      legendTitle.classList.add('legend-title');
-      legend.appendChild(legendTitle);
-      
-      // 범례 항목을 담을 컨테이너
-      const legendItemsContainer = document.createElement('div');
-      legendItemsContainer.classList.add('legend-items-container');
-      legend.appendChild(legendItemsContainer);
-      
-      // 현재 사용자 먼저 추가
-      if (currentUser) {
-        const currentUserItem = createLegendItem(currentUser.id, currentUser.name, true);
-        legendItemsContainer.appendChild(currentUserItem);
-      }
-      
-      // 위원 순서 정렬을 위한 목록
-      const committeeOrder = ['김수연', '이연숙', '이정혜', '문일지', '신용기'];
-      
-      // 위원별 색상 항목 추가 (지정된 순서대로)
-      committeeOrder.forEach(committeeName => {
-        // 이미 현재 사용자로 추가된 경우 건너뛰기
-        if (currentUser && currentUser.name === committeeName) {
+          // 디버깅: 샘플 매칭 데이터 출력
+          console.log('현재 매칭 데이터 샘플:', window.allMatchings.slice(0, 3));
           return;
         }
         
-        const committee = committees.find(c => c.name === committeeName);
-        if (committee) {
-          const legendItem = createLegendItem(committee.id, committee.name);
-          legendItemsContainer.appendChild(legendItem);
+        // API를 통해 매칭 정보 가져오기
+        if (window.api && window.api.committees && typeof window.api.committees.getMatching === 'function') {
+          console.log('API를 통해 매칭 정보 가져오기 시도');
+          
+          const response = await window.api.committees.getMatching();
+          
+          // 응답이 배열인 경우 (API가 배열을 직접 반환하는 경우)
+          if (Array.isArray(response)) {
+            console.log('API에서 배열 형태로 매칭 정보 반환:', response.length + '개');
+            
+            // 이미 올바른 형식이면 그대로 사용
+            if (response.length > 0 && (response[0].committeeId || response[0].committeeName)) {
+              window.allMatchings = response;
+              committeeOrgMatchings = response;
+              console.log('매칭 정보 저장 완료:', committeeOrgMatchings.length + '개');
+              console.log('매칭 데이터 샘플:', committeeOrgMatchings.slice(0, 3));
+              return;
+            }
+            
+            // 형식 변환이 필요한 경우
+            const formattedMatchings = response.map(item => {
+              // 이미 영문 필드명을 사용하는 경우
+              if (item.committeeName || item.committeeId) {
+                return item;
+              }
+              
+              // 한글 필드명을 사용하는 경우 변환
+              return {
+                committeeName: item.위원명 || '',
+                committeeId: item.위원ID || '',
+                orgCode: item.기관코드 || '',
+                orgName: item.기관명 || '',
+                region: item.지역 || '',
+                role: Array.isArray(item.주담당) && item.주담당.includes(item.위원명) ? '주담당' : '부담당',
+                // 원본 한글 필드도 유지 (데이터 일관성을 위해)
+                위원명: item.위원명 || '',
+                위원ID: item.위원ID || '',
+                기관코드: item.기관코드 || '',
+                기관명: item.기관명 || '',
+                지역: item.지역 || '',
+                주담당: item.주담당 || [],
+                부담당: item.부담당 || []
+              };
+            });
+            
+            window.allMatchings = formattedMatchings;
+            committeeOrgMatchings = formattedMatchings;
+            console.log('매칭 정보 변환 완료:', committeeOrgMatchings.length + '개');
+            console.log('변환된 매칭 데이터 샘플:', committeeOrgMatchings.slice(0, 3));
+            return;
+          }
+          // 응답이 객체이고 status와 data 속성이 있는 경우 (기존 형식)
+          else if (response && response.status === 'success' && response.data && response.data.matchings) {
+            // 매칭 정보 저장
+            console.log('API에서 가져온 매칭 정보 처리:', response.data.matchings.length + '개');
+            
+            // 원본 데이터 보존 (한글 필드명)
+            const originalMatchings = response.data.matchings;
+            
+            // 매칭 정보 형식 변환하여 전역 변수에 저장 (영문 필드명으로 통일)
+            const formattedMatchings = originalMatchings.map(item => {
+              return {
+                committeeName: item.위원명 || '',
+                committeeId: item.위원ID || '',
+                orgCode: item.기관코드 || '',
+                orgName: item.기관명 || '',
+                region: item.지역 || '',
+                role: Array.isArray(item.주담당) && item.주담당.includes(item.위원명) ? '주담당' : '부담당',
+                // 원본 한글 필드도 유지 (데이터 일관성을 위해)
+                위원명: item.위원명 || '',
+                위원ID: item.위원ID || '',
+                기관코드: item.기관코드 || '',
+                기관명: item.기관명 || '',
+                지역: item.지역 || '',
+                주담당: item.주담당 || [],
+                부담당: item.부담당 || []
+              };
+            });
+            
+            // 통합된 형식으로 저장
+            window.allMatchings = formattedMatchings;
+            committeeOrgMatchings = formattedMatchings;
+            
+            console.log('매칭 정보 변환 완료:', committeeOrgMatchings.length + '개');
+            console.log('변환된 매칭 데이터 샘플:', committeeOrgMatchings.slice(0, 3));
+          } else {
+            console.warn('매칭 정보 가져오기 실패:', response);
+            // 기본 매칭 정보 생성 (구글 시트 데이터 기반)
+            createDefaultMatchings();
+          }
+        } else {
+          console.warn('API 함수를 찾을 수 없습니다.');
+          // 기본 매칭 정보 생성 (구글 시트 데이터 기반)
+          createDefaultMatchings();
+        }
+      } catch (error) {
+        console.error('매칭 정보 가져오기 중 오류:', error);
+        // 기본 매칭 정보 생성 (구글 시트 데이터 기반)
+        createDefaultMatchings();
+      }
+    }
+
+    // 기본 매칭 정보 생성 (구글 시트 데이터 기반)
+    function createDefaultMatchings() {
+      console.log('기본 매칭 정보 생성');
+      
+      // 구글 시트 데이터 기반으로 매칭 정보 생성
+      const rawDefaultMatchings = [
+        {
+          위원ID: 'C001',
+          위원명: '신용기',
+          기관코드: 'A48170002',
+          기관명: '전주노인복지지원센터',
+          주담당: ['신용기'],
+          부담당: [],
+          지역: '전주시'
+        },
+        {
+          위원ID: 'C002',
+          위원명: '김수연',
+          기관코드: 'A48170003',
+          기관명: '목포노인복지지원센터',
+          주담당: ['김수연'],
+          부담당: [],
+          지역: '목포시'
+        },
+        {
+          위원ID: 'C003',
+          위원명: '문일지',
+          기관코드: 'A48170004',
+          기관명: '광주노인복지지원센터',
+          주담당: ['문일지'],
+          부담당: [],
+          지역: '광주시'
+        },
+        {
+          위원ID: 'C004',
+          위원명: '이연숙',
+          기관코드: 'A48170005',
+          기관명: '부산노인복지지원센터',
+          주담당: ['이연숙'],
+          부담당: [],
+          지역: '부산시'
+        },
+        {
+          위원ID: 'C005',
+          위원명: '이정혜',
+          기관코드: 'A48170006',
+          기관명: '대구노인복지지원센터',
+          주담당: ['이정혜'],
+          부담당: [],
+          지역: '대구시'
+        },
+        {
+          위원ID: 'C001',
+          위원명: '신용기',
+          기관코드: 'A48880002',
+          기관명: '거창노인복지지원센터',
+          주담당: [],
+          부담당: ['신용기'],
+          지역: '거창군'
+        },
+        {
+          위원ID: 'C003',
+          위원명: '문일지',
+          기관코드: 'A48880002',
+          기관명: '거창노인복지지원센터',
+          주담당: ['문일지'],
+          부담당: [],
+          지역: '거창군'
+        },
+        {
+          위원ID: 'C001',
+          위원명: '신용기',
+          기관코드: 'A48820003',
+          기관명: '대리노인 고성지원센터(노인종합복지센터)',
+          주담당: [],
+          부담당: ['신용기'],
+          지역: '고성군'
+        },
+        {
+          위원ID: 'C003',
+          위원명: '문일지',
+          기관코드: 'A48820003',
+          기관명: '대리노인 고성지원센터(노인종합복지센터)',
+          주담당: ['문일지'],
+          부담당: [],
+          지역: '고성군'
+        },
+        {
+          위원ID: 'C001',
+          위원명: '신용기',
+          기관코드: 'A48820004',
+          기관명: '한음생명회',
+          주담당: [],
+          부담당: ['신용기'],
+          지역: '고성군'
+        },
+        {
+          위원ID: 'C003',
+          위원명: '문일지',
+          기관코드: 'A48820004',
+          기관명: '한음생명회',
+          주담당: ['문일지'],
+          부담당: [],
+          지역: '고성군'
+        },
+        {
+          위원ID: 'C001',
+          위원명: '신용기',
+          기관코드: 'A48170003',
+          기관명: '남원노인복지지원센터',
+          주담당: [],
+          부담당: ['신용기'],
+          지역: '전주시'
+        },
+        {
+          위원ID: 'C003',
+          위원명: '문일지',
+          기관코드: 'A48170003',
+          기관명: '남원노인복지지원센터',
+          주담당: ['문일지'],
+          부담당: [],
+          지역: '전주시'
+        },
+        {
+          위원ID: 'C003',
+          위원명: '문일지',
+          기관코드: 'A48880003',
+          기관명: '거상에노인복지지원센터',
+          주담당: ['문일지'],
+          부담당: [],
+          지역: '거창군'
+        },
+        {
+          위원ID: 'C001',
+          위원명: '신용기',
+          기관코드: 'A48880003',
+          기관명: '거상에노인복지지원센터',
+          주담당: [],
+          부담당: ['신용기'],
+          지역: '거창군'
+        },
+        {
+          위원ID: 'C004',
+          위원명: '이연숙',
+          기관코드: 'A48170004',
+          기관명: '광역시노인복지지원센터',
+          주담당: ['이연숙'],
+          부담당: [],
+          지역: '전주시'
+        }
+      ];
+      // 데이터 형식 통일화
+      const formattedDefaultMatchings = rawDefaultMatchings.map(match => {
+        return {
+          committeeId: match.위원ID || '',
+          committeeName: match.위원명 || '',
+          orgCode: match.기관코드 || '',
+          orgName: match.기관명 || '',
+          region: match.지역 || '',
+          role: Array.isArray(match.주담당) && match.주담당.includes(match.위원명) ? '주담당' : '부담당'
+        };
+      });
+      
+      window.allMatchings = formattedDefaultMatchings;
+      committeeOrgMatchings = formattedDefaultMatchings;
+      console.log('기본 매칭 정보 생성 완료:', committeeOrgMatchings.length + '개');
+      console.log('기본 매칭 데이터 예시:', committeeOrgMatchings.slice(0, 3));
+    }
+    
+    // 위원의 주담당 기관 코드 가져오기
+    function getCommitteePrimaryOrgs(committeeName) {
+      if (!committeeName) {
+        console.warn('위원명이 없어 주담당 기관을 찾을 수 없습니다.');
+        return [];
+      }
+      
+      // 매칭 데이터 확인
+      const committeeOrgMatchings = window.allMatchings || [];
+      if (!committeeOrgMatchings || committeeOrgMatchings.length === 0) {
+        console.warn('매칭 데이터가 없어 주담당 기관을 찾을 수 없습니다.');
+        return [];
+      }
+      
+      console.log(`${committeeName} 위원의 주담당 기관 찾기 시도`);
+      
+      // 주담당으로 있는 기관 코드 추출
+      const orgCodes = [];
+      const addedOrgCodes = new Set(); // 중복 방지를 위한 Set
+      
+      committeeOrgMatchings.forEach(matching => {
+        // 새로운 데이터 형식(영문 필드명) 확인 - 주담당인 경우만 추가
+        if (matching.committeeName === committeeName && 
+            matching.role === '주담당' && 
+            matching.orgCode && 
+            !addedOrgCodes.has(matching.orgCode)) {
+          orgCodes.push(matching.orgCode);
+          addedOrgCodes.add(matching.orgCode);
+          console.log(`${committeeName} 위원의 주담당 기관 추가(새 형식): ${matching.orgName || ''} (${matching.orgCode})`);
+        }
+        // 이전 데이터 형식(한글 필드명) 확인 - 위원명 직접 비교 & 역할이 주담당인 경우만
+        else if (matching.위원명 === committeeName && 
+                 matching.역할 === '주담당' && 
+                 matching.기관코드 && 
+                 !addedOrgCodes.has(matching.기관코드)) {
+          orgCodes.push(matching.기관코드);
+          addedOrgCodes.add(matching.기관코드);
+          console.log(`${committeeName} 위원의 주담당 기관 추가(위원명 직접 비교): ${matching.기관명 || ''} (${matching.기관코드})`);
+        }
+        // 이전 데이터 형식(한글 필드명) 확인 - 주담당 배열에서 확인
+        else if (matching.주담당 && Array.isArray(matching.주담당) && 
+                 matching.주담당.includes(committeeName) && 
+                 matching.기관코드 && 
+                 !addedOrgCodes.has(matching.기관코드)) {
+          orgCodes.push(matching.기관코드);
+          addedOrgCodes.add(matching.기관코드);
+          console.log(`${committeeName} 위원의 주담당 기관 추가(주담당 배열): ${matching.기관명 || ''} (${matching.기관코드})`);
         }
       });
       
-      // 범례 추가
-      calendarHeader.appendChild(legend);
-    }, 500); // 다른 요소들이 렌더링된 후 추가
-  }
-  
-  // 범례 항목 생성 헬퍼 함수
-  function createLegendItem(committeeId, committeeName, isCurrentUser = false) {
-    const legendItem = document.createElement('div');
-    legendItem.classList.add('legend-item');
-    if (isCurrentUser) {
-      legendItem.classList.add('current-user');
+      // 중복 제거 후 결과 반환
+      console.log(`${committeeName} 위원의 주담당 기관 코드 ${orgCodes.length}개 찾음`);
+      return orgCodes;
+    }
+
+    // 초기화 함수
+    async function init() {
+      try {
+        console.log('캘린더 초기화 함수 호출 시작');
+        const today = new Date();
+        currentYear = today.getFullYear();
+        currentMonth = today.getMonth();
+        currentDate = today.getDate();
+        
+        console.log('현재 날짜 설정:', { 년: currentYear, 월: currentMonth + 1, 일: currentDate });
+        
+        try {
+          console.log('위원 및 기관 정보 가져오기 시도');
+          
+          if (typeof getCommittees === 'function') {
+            await getCommittees();
+            console.log('위원 정보 가져오기 성공');
+          } else {
+            console.warn('위원 정보 가져오기 함수가 정의되지 않았습니다.');
+            committees = [];
+          }
+          
+          if (typeof getOrganizations === 'function') {
+            await getOrganizations();
+            console.log('기관 정보 가져오기 성공');
+          } else {
+            console.warn('기관 정보 가져오기 함수가 정의되지 않았습니다.');
+            organizations = [];
+          }
+          
+          // 위원-기관 매칭 정보 가져오기
+          if (typeof loadCommitteeMatchings === 'function') {
+            await loadCommitteeMatchings();
+            console.log('위원-기관 매칭 정보 가져오기 성공');
+          } else {
+            console.warn('위원-기관 매칭 정보 가져오기 함수가 정의되지 않았습니다.');
+          }
+        } catch (dataError) {
+          console.error('데이터 가져오기 중 오류:', dataError);
+        }
+        
+        try {
+          if (typeof loadSchedulesFromLocalStorage === 'function') {
+            loadSchedulesFromLocalStorage();
+            console.log('로컬 스토리지에서 일정 불러오기 성공');
+          } else {
+            console.warn('로컬 스토리지에서 일정 불러오기 함수가 정의되지 않았습니다.');
+          }
+        } catch (storageError) {
+          console.error('로컬 스토리지에서 일정 불러오기 중 오류:', storageError);
+        }
+        
+        try {
+          if (typeof renderCalendar === 'function') {
+            renderCalendar(currentYear, currentMonth);
+            console.log('캘린더 렌더링 성공');
+          } else {
+            console.error('캘린더 렌더링 함수가 정의되지 않았습니다.');
+          }
+        } catch (renderError) {
+          console.error('캘린더 렌더링 중 오류:', renderError);
+        }
+        
+        try {
+          if (typeof setupEventListeners === 'function') {
+            setupEventListeners();
+            console.log('이벤트 리스너 등록 성공');
+          } else {
+            console.warn('이벤트 리스너 등록 함수가 정의되지 않았습니다.');
+          }
+        } catch (eventError) {
+          console.error('이벤트 리스너 등록 중 오류:', eventError);
+        }
+        
+        console.log('캘린더 초기화 완료');
+      } catch (error) {
+        console.error('캘린더 초기화 중 오류:', error);
+      }
+    }
+
+    // 이벤트 리스너 설정 함수
+    function setupEventListeners() {
+      console.log('이벤트 리스너 설정 시작');
+      
+      function removeAllEventListeners(element) {
+        if (!element) return;
+        const newElement = element.cloneNode(true);
+        element.parentNode.replaceChild(newElement, element);
+        return newElement;
+      }
+      
+      // 일정 저장 버튼 이벤트 리스너
+      const saveScheduleBtn = document.getElementById('save-schedule-btn');
+      if (saveScheduleBtn) {
+        const newSaveBtn = removeAllEventListeners(saveScheduleBtn);
+        newSaveBtn.addEventListener('click', saveSchedule);
+      }
+      
+      // 일정 삭제 버튼 이벤트 리스너
+      const deleteScheduleBtn = document.getElementById('delete-schedule-btn');
+      if (deleteScheduleBtn) {
+        const newDeleteBtn = removeAllEventListeners(deleteScheduleBtn);
+        newDeleteBtn.addEventListener('click', deleteSchedule);
+      }
+      
+      // 모달 닫기 버튼 이벤트 리스너
+      document.querySelectorAll('.close-modal').forEach(closeBtn => {
+        closeBtn.addEventListener('click', function() {
+          const modal = this.closest('.modal');
+          if (modal) {
+            modal.style.display = 'none';
+          }
+        });
+      });
+      
+      // 모달 외부 클릭 시 닫기
+      window.addEventListener('click', function(event) {
+        const modals = document.querySelectorAll('.modal');
+        modals.forEach(modal => {
+          if (event.target === modal) {
+            modal.style.display = 'none';
+          }
+        });
+      });
+      
+      const prevMonthBtn = document.getElementById('prev-month');
+      if (prevMonthBtn) {
+        const newPrevBtn = removeAllEventListeners(prevMonthBtn);
+        newPrevBtn.addEventListener('click', () => {
+          console.log('이전 월 버튼 클릭');
+          currentMonth--;
+          if (currentMonth < 0) {
+            currentMonth = 11;
+            currentYear--;
+          }
+          renderCalendar(currentYear, currentMonth);
+        });
+      }
+      
+      const nextMonthBtn = document.getElementById('next-month');
+      if (nextMonthBtn) {
+        const newNextBtn = removeAllEventListeners(nextMonthBtn);
+        newNextBtn.addEventListener('click', () => {
+          console.log('다음 월 버튼 클릭');
+          currentMonth++;
+          if (currentMonth > 11) {
+            currentMonth = 0;
+            currentYear++;
+          }
+          renderCalendar(currentYear, currentMonth);
+        });
+      }
+      
+      const todayBtn = document.getElementById('today-btn');
+      if (todayBtn) {
+        const newTodayBtn = removeAllEventListeners(todayBtn);
+        newTodayBtn.addEventListener('click', () => {
+          console.log('오늘 버튼 클릭');
+          const today = new Date();
+          currentYear = today.getFullYear();
+          currentMonth = today.getMonth();
+          currentDate = today.getDate();
+          renderCalendar(currentYear, currentMonth);
+        });
+      }
+      
+      document.querySelectorAll('.modal .close').forEach(closeBtn => {
+        closeBtn.addEventListener('click', () => {
+          const modal = closeBtn.closest('.modal');
+          if (modal) {
+            modal.style.display = 'none';
+          }
+        });
+      });
+      
+      console.log('이벤트 리스너 설정 완료');
+    }
+
+    // 캘린더 렌더링 함수
+    function renderCalendar(year, month) {
+      console.log('캘린더 렌더링 시작:', { 년: year, 월: month + 1 });
+      
+      const calendarGrid = document.getElementById('calendar-grid');
+      if (!calendarGrid) {
+        console.error('캘린더 그리드 요소를 찾을 수 없습니다.');
+        return;
+      }
+      
+      const monthYearText = document.getElementById('month-year');
+      if (monthYearText) {
+        monthYearText.textContent = `${year}년 ${month + 1}월`;
+      }
+      
+      const firstDay = new Date(year, month, 1);
+      const startingDay = firstDay.getDay();
+      const lastDay = new Date(year, month + 1, 0);
+      const endingDate = lastDay.getDate();
+      const prevMonthLastDay = new Date(year, month, 0);
+      const prevMonthLastDate = prevMonthLastDay.getDate();
+      
+      calendarGrid.innerHTML = '';
+      
+      const weekdays = ['일', '월', '화', '수', '목', '금', '토'];
+      weekdays.forEach(day => {
+        const dayHeader = document.createElement('div');
+        dayHeader.classList.add('day-header');
+        dayHeader.textContent = day;
+        
+        if (day === '일') {
+          dayHeader.classList.add('sunday');
+        }
+        
+        calendarGrid.appendChild(dayHeader);
+      });
+      
+      let dateCell;
+      let cellDate;
+      
+      for (let i = 0; i < startingDay; i++) {
+        dateCell = document.createElement('div');
+        dateCell.classList.add('date-cell', 'inactive');
+        
+        if (i % 7 === 0) {
+          dateCell.classList.add('sunday');
+        }
+        
+        cellDate = prevMonthLastDate - startingDay + i + 1;
+        dateCell.innerHTML = `<div class="date-number">${cellDate}</div>`;
+        calendarGrid.appendChild(dateCell);
+      }
+      
+      const today = new Date();
+      for (let i = 1; i <= endingDate; i++) {
+        dateCell = document.createElement('div');
+        dateCell.classList.add('date-cell');
+        
+        if (year === today.getFullYear() && month === today.getMonth() && i === today.getDate()) {
+          dateCell.classList.add('today');
+        }
+        
+        const cellDay = new Date(year, month, i).getDay();
+        if (cellDay === 0) {
+          dateCell.classList.add('sunday');
+        }
+        
+        const dateContainer = document.createElement('div');
+        dateContainer.className = 'date-number';
+        dateContainer.textContent = i;
+        dateCell.appendChild(dateContainer);
+        
+        // 날짜 셀 스타일에 커서 포인터 추가
+        dateCell.style.cursor = 'pointer';
+        dateContainer.style.cursor = 'pointer';
+        
+        const monthStr = String(month + 1).padStart(2, '0');
+        const dayStr = String(i).padStart(2, '0');
+        const dateString = `${year}-${monthStr}-${dayStr}`;
+        
+        // 날짜 셀에 클릭 이벤트 추가 - 일정 추가 모달 표시
+        dateCell.addEventListener('click', (e) => {
+          // 일정 항목이 아닌 경우에만 일정 추가 모달 표시
+          if (!e.target.classList.contains('schedule-item') && 
+              !e.target.classList.contains('schedule-dot') && 
+              !e.target.classList.contains('schedule-title') && 
+              !e.target.classList.contains('schedule-more')) {
+            
+            e.stopPropagation(); // 이벤트 전파 방지
+            console.log('날짜 셀 클릭 - 일정 추가 모달 열기:', dateString);
+            
+            // 전역 함수 호출 (일관성을 위해 항상 전역 함수 사용)
+            window.openScheduleFormModal(dateString);
+          }
+        });
+        
+        // 일정 추가 버튼 삭제 - 날짜 셀 클릭으로 통합
+        
+        const dateSchedules = schedules.filter(schedule => {
+          const scheduleDate = schedule.scheduleDate || schedule.date || schedule.startDate;
+          return scheduleDate === dateString;
+        });
+        
+        if (dateSchedules.length > 0) {
+          const scheduleList = document.createElement('div');
+          scheduleList.classList.add('schedule-list');
+          
+          const maxDisplay = 3;
+          const displayCount = Math.min(dateSchedules.length, maxDisplay);
+          
+          for (let j = 0; j < displayCount; j++) {
+            const schedule = dateSchedules[j];
+            const scheduleItem = document.createElement('div');
+            scheduleItem.classList.add('schedule-item');
+            
+            if (schedule.status === 'completed') {
+              scheduleItem.classList.add('completed');
+            } else if (schedule.status === 'pending') {
+              scheduleItem.classList.add('pending');
+            } else if (schedule.status === 'canceled') {
+              scheduleItem.classList.add('canceled');
+            }
+            
+            let committeeId = schedule.committeeId;
+            let committeeName = schedule.committeeName || '담당자 미지정';
+            
+            // 기관명 추출
+            let orgName = '';
+            if (schedule.organizationName) {
+              orgName = schedule.organizationName;
+            } else if (schedule.orgName) {
+              orgName = schedule.orgName;
+            } else if (schedule.orgCode || schedule.organizationCode) {
+              const orgCode = schedule.orgCode || schedule.organizationCode;
+              orgName = getOrganizationName(orgCode);
+            }
+            
+            if (!orgName || orgName === '') {
+              orgName = '기관명';
+            }
+            
+            const title = schedule.title || (orgName ? `${orgName} 방문` : '일정');
+            
+            // 위원 이름 기반으로 색상 가져오기 (위원 ID 대신 이름 사용)
+            const committeeColor = getCommitteeColor(committeeName);
+            
+            const dotColor = schedule.status === 'completed' ? '#4caf50' : 
+                           schedule.status === 'pending' ? '#ffc107' : 
+                           schedule.status === 'canceled' ? '#f44336' : 
+                           committeeColor;
+            
+            // 일정 정보를 텍스트로 표시 (더 짧게 잘라서 표시)
+            const truncatedTitle = title.length > 6 ? title.substring(0, 6) + '...' : title;
+            
+            scheduleItem.innerHTML = `
+              <div class="schedule-dot" style="background-color: ${dotColor};"></div>
+              <div class="schedule-title" style="color: ${committeeColor}; font-weight: 600; font-size: 0.75rem;">${truncatedTitle}</div>
+            `;
+            
+            // 일정 항목 배경색을 위원에 맞게 설정 (투명도 낮게)
+            scheduleItem.style.backgroundColor = `${committeeColor}15`;
+            scheduleItem.style.borderLeft = `3px solid ${committeeColor}`;
+            
+            // 투툴팁 추가
+            scheduleItem.title = `${title} - ${committeeName}`;
+            
+            // 일정 항목 클릭 시 해당 일정의 상세 정보 모달 표시
+            scheduleItem.addEventListener('click', (e) => {
+              e.stopPropagation();
+              // 해당 일정의 ID를 이용해 상세 정보 모달 표시
+              showScheduleDetail(schedule.id || schedule._id);
+            });
+            
+            scheduleList.appendChild(scheduleItem);
+          }
+          
+          if (dateSchedules.length > maxDisplay) {
+            const moreItem = document.createElement('div');
+            moreItem.classList.add('schedule-more');
+            moreItem.textContent = `+${dateSchedules.length - maxDisplay}개 더보기`;
+            
+            moreItem.addEventListener('click', (e) => {
+              e.stopPropagation();
+              showDateSchedules(dateString);
+            });
+            
+            scheduleList.appendChild(moreItem);
+          }
+          
+          dateCell.appendChild(scheduleList);
+        }
+        
+        // 날짜 셀 클릭 이벤트는 위에서 이미 처리했으므로 여기서는 제거
+        
+        calendarGrid.appendChild(dateCell);
+      }
+      
+      const totalCells = 42;
+      const remainingCells = totalCells - (startingDay + endingDate);
+      
+      for (let i = 1; i <= remainingCells; i++) {
+        dateCell = document.createElement('div');
+        dateCell.classList.add('date-cell', 'inactive');
+        
+        const cellDay = (startingDay + endingDate + i - 1) % 7;
+        if (cellDay === 0) {
+          dateCell.classList.add('sunday');
+        }
+        
+        dateCell.innerHTML = `<div class="date-number">${i}</div>`;
+        calendarGrid.appendChild(dateCell);
+      }
+    }
+
+    // 날짜별 일정 모달 표시 함수
+    function showDateSchedules(dateString) {
+      try {
+        const dateSchedules = schedules.filter(schedule => {
+          const scheduleDate = schedule.scheduleDate || schedule.date || schedule.startDate;
+          return scheduleDate === dateString;
+        });
+        
+        const modal = document.getElementById('schedules-list-modal');
+        const modalTitle = document.getElementById('schedules-list-modal-title');
+        const schedulesList = document.getElementById('schedules-list');
+        
+        if (!modal || !modalTitle || !schedulesList) {
+          console.error('일정 목록 모달 요소를 찾을 수 없습니다.');
+          return;
+        }
+        
+        const formattedDate = dateString.replace(/^(\d{4})-(\d{2})-(\d{2})$/, '$1년 $2월 $3일');
+        modalTitle.textContent = `${formattedDate} 일정`;
+        
+        schedulesList.innerHTML = '';
+        
+        if (dateSchedules.length === 0) {
+          schedulesList.innerHTML = `
+            <div class="empty-message">
+              <i class="fas fa-calendar-times"></i>
+              <p>이 날짜에 등록된 일정이 없습니다.</p>
+            </div>
+          `;
+        } else {
+          const countInfo = document.createElement('div');
+          countInfo.className = 'schedule-count';
+          countInfo.innerHTML = `총 <strong>${dateSchedules.length}</strong>개의 일정`;
+          schedulesList.appendChild(countInfo);
+        }
+        
+        dateSchedules.forEach(schedule => {
+          const scheduleItem = document.createElement('div');
+          scheduleItem.classList.add('schedule-item');
+          
+          if (schedule.status === 'completed') {
+            scheduleItem.classList.add('completed');
+          } else if (schedule.status === 'pending') {
+            scheduleItem.classList.add('pending');
+          } else if (schedule.status === 'canceled') {
+            scheduleItem.classList.add('canceled');
+          }
+          
+          let orgName = '';
+          if (schedule.organizationName) {
+            orgName = schedule.organizationName;
+          } else if (schedule.orgName) {
+            orgName = schedule.orgName;
+          } else if (schedule.orgCode || schedule.organizationCode) {
+            const orgCode = schedule.orgCode || schedule.organizationCode;
+            orgName = getOrganizationName(orgCode);
+          } else {
+            orgName = '기관 미지정';
+          }
+          
+          let committeeName = schedule.committeeName || '담당자 미지정';
+          let timeInfo = schedule.time || '종일';
+          const title = schedule.title || `${orgName} 방문`;
+          
+          let statusText = '';
+          let statusClass = '';
+          
+          if (schedule.status === 'completed') {
+            statusText = '완료';
+            statusClass = 'completed';
+          } else if (schedule.status === 'pending') {
+            statusText = '예정';
+            statusClass = 'pending';
+          } else if (schedule.status === 'canceled') {
+            statusText = '취소';
+            statusClass = 'canceled';
+          }
+          
+          const committeeColor = getCommitteeColor(schedule.committeeId);
+          const dotColor = schedule.status === 'completed' ? '#4caf50' : 
+                         schedule.status === 'pending' ? '#ffc107' : 
+                         schedule.status === 'canceled' ? '#f44336' : 
+                         committeeColor;
+          
+          scheduleItem.innerHTML = `
+            <div class="schedule-header">
+              <div class="schedule-dot" style="background-color: ${dotColor};"></div>
+              <div class="schedule-title">${title}</div>
+              ${statusText ? `<span class="status-badge ${statusClass}">${statusText}</span>` : ''}
+            </div>
+            <div class="schedule-details">
+              <div class="schedule-time"><i class="far fa-clock"></i> ${timeInfo}</div>
+              <div class="schedule-info">
+                <span class="committee"><i class="far fa-user"></i> ${committeeName}</span>
+                <span class="org"><i class="far fa-building"></i> ${orgName}</span>
+              </div>
+              ${schedule.notes ? `<div class="schedule-notes">${schedule.notes}</div>` : ''}
+            </div>
+          `;
+          
+          schedulesList.appendChild(scheduleItem);
+        });
+        
+        modal.style.display = 'block';
+        
+        const event = new CustomEvent('date-cell-click', {
+          detail: { date: dateString }
+        });
+        document.dispatchEvent(event);
+      } catch (error) {
+        console.error('날짜별 일정 모달 표시 중 오류:', error);
+      }
+    }
+
+    // 사용자 정보 가져오기 함수
+    async function getCurrentUser() {
+      try {
+        const response = await fetch('/api/auth/me', {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          credentials: 'include'
+        });
+        
+        if (!response.ok) {
+          throw new Error(`API 오류: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        return data.data.user;
+      } catch (error) {
+        console.error('사용자 정보 가져오기 중 오류:', error);
+        try {
+          const userData = localStorage.getItem('user');
+          if (userData) {
+            return JSON.parse(userData);
+          }
+        } catch (e) {
+          console.error('로컬 스토리지에서 사용자 정보 가져오기 중 오류:', e);
+        }
+        return null;
+      }
+    }
+
+    // 일정 가져오기 함수
+    async function getSchedules() {
+      try {
+        const localData = localStorage.getItem(LOCAL_STORAGE_SCHEDULES_KEY);
+        const lastUpdate = localStorage.getItem(LOCAL_STORAGE_LAST_UPDATE_KEY);
+        
+        if (localData && lastUpdate) {
+          const lastUpdateTime = new Date(lastUpdate).getTime();
+          const currentTime = new Date().getTime();
+          const hoursDiff = (currentTime - lastUpdateTime) / (1000 * 60 * 60);
+          
+          if (hoursDiff < 24) {
+            console.log('로컬 스토리지에서 일정 데이터 로드');
+            schedules = JSON.parse(localData);
+            return schedules;
+          }
+        }
+        
+        return [];
+      } catch (error) {
+        console.error('일정 가져오기 중 오류:', error);
+        return [];
+      }
+    }
+
+    // 위원 목록 가져오기 함수
+    async function getCommittees() {
+      try {
+        CalendarDebugger.log('위원 정보 가져오기 시도');
+        
+        committees = window.defaultCommittees || [];
+        
+        committees.forEach(committee => {
+          if (committee.id && committee.name) {
+            committeeMap[committee.id] = committee.name;
+          }
+        });
+        
+        console.log(`기본 데이터로 ${committees.length}개 위원 정보 사용`);
+        currentUser = committees[0];
+        
+        return committees;
+      } catch (error) {
+        console.error('위원 정보 가져오기 중 오류:', error);
+        
+        const defaultCommittees = [];
+        
+        return defaultCommittees;
+      }
+    }
+
+    // 기관 목록 가져오기 함수
+    async function getOrganizations() {
+      try {
+        if (organizations.length > 0) {
+          console.log('이미 로드된 기관 정보 사용');
+          return organizations;
+        }
+        
+        CalendarDebugger.log('기본 기관 데이터 사용');
+        
+        organizations = window.defaultOrganizations || [
+          { id: 'A48240001', code: 'A48240001', name: '서울특별시 노인복지센터', description: '노인복지센터' },
+          { id: 'A48240002', code: 'A48240002', name: '강남구 노인복지센터', description: '노인복지센터' },
+          { id: 'A48240003', code: 'A48240003', name: '강동구 노인복지센터', description: '노인복지센터' },
+          { id: 'A48240004', code: 'A48240004', name: '강북구 노인복지센터', description: '노인복지센터' },
+          { id: 'A48240005', code: 'A48240005', name: '강서구 노인복지센터', description: '노인복지센터' },
+          { id: 'A48240006', code: 'A48240006', name: '관악구 노인복지센터', description: '노인복지센터' }
+        ];
+        
+        organizations.forEach(org => {
+          if (org && (org.code || org.id) && org.name) {
+            const code = org.code || org.id;
+            organizationMap[code] = org.name;
+          }
+        });
+        
+        console.log(`기본 데이터로 ${organizations.length}개 기관 정보 사용`);
+        
+        return organizations;
+      } catch (error) {
+        console.error('기관 정보 가져오기 중 오류:', error);
+        
+        const defaultOrganizations = [
+          { id: 'A48240001', code: 'A48240001', name: '서울특별시 노인복지센터', description: '노인복지센터' },
+          { id: 'A48240002', code: 'A48240002', name: '강남구 노인복지센터', description: '노인복지센터' }
+        ];
+        
+        defaultOrganizations.forEach(org => {
+          if (org && (org.code || org.id) && org.name) {
+            const code = org.code || org.id;
+            organizationMap[code] = org.name;
+          }
+        });
+        
+        return defaultOrganizations;
+      }
+    }
+
+    // 로컬 스토리지에 일정 저장
+    function saveSchedulesToLocalStorage() {
+      try {
+        // 일정 데이터 형식 통일화
+        const formattedSchedules = schedules.map(schedule => {
+          // 필수 필드가 있는지 확인하고 없으면 추가
+          // 날짜 값이 없는 경우 오류 로그 추가
+          if (!schedule.date && !schedule.visitDate && !schedule.scheduleDate) {
+            console.error('일정에 날짜 정보가 없습니다:', schedule);
+          }
+          
+          // 날짜 값 처리
+          const dateValue = schedule.scheduleDate || schedule.date || schedule.visitDate || new Date().toISOString().split('T')[0];
+          console.log(`일정 날짜 처리: ${dateValue} (ID: ${schedule.id || '새 일정'})`);
+          
+          return {
+            id: schedule.id || `schedule_${new Date().getTime()}_${Math.random().toString(36).substring(2, 9)}`,
+            date: dateValue,
+            visitDate: dateValue,
+            scheduleDate: dateValue,
+            committeeName: schedule.committeeName || '미지정',
+            organizationName: schedule.organizationName || schedule.orgName || '미지정',
+            orgName: schedule.orgName || schedule.organizationName || '미지정',
+            orgCode: schedule.orgCode || '',
+            startTime: schedule.startTime || schedule.time?.split('-')[0]?.trim() || '미지정',
+            endTime: schedule.endTime || (schedule.time?.includes('-') ? schedule.time.split('-')[1]?.trim() : '미지정'),
+            time: schedule.time || `${schedule.startTime || '미지정'} - ${schedule.endTime || '미지정'}`,
+            status: schedule.status || 'pending',
+            notes: schedule.notes || schedule.memo || '',
+            memo: schedule.memo || schedule.notes || '',
+            title: schedule.title || `${schedule.organizationName || schedule.orgName || '미지정'} 방문`,
+            createdAt: schedule.createdAt || new Date().toISOString()
+          };
+        });
+
+        // 기존 키에 저장
+        localStorage.setItem(LOCAL_STORAGE_SCHEDULES_KEY, JSON.stringify(formattedSchedules));
+        localStorage.setItem(LOCAL_STORAGE_LAST_UPDATE_KEY, new Date().toISOString());
+        
+        // 추가: 다른 페이지에서도 사용할 수 있도록 calendar_schedules 키에도 저장
+        localStorage.setItem('calendar_schedules', JSON.stringify(formattedSchedules));
+        
+        // 마스터 대시보드에 일정 업데이트 알림
+        const updateEvent = new CustomEvent('masterDashboardDataUpdated', {
+          detail: {
+            type: 'update',
+            data: {
+              schedules: formattedSchedules
+            }
+          }
+        });
+        document.dispatchEvent(updateEvent);
+        
+        console.log(`로컬 스토리지에 ${formattedSchedules.length}개 일정 저장 완료`);
+        schedules = formattedSchedules; // 형식화된 데이터로 업데이트
+      } catch (error) {
+        console.error('로컬 스토리지에 일정 저장 중 오류:', error);
+      }
+    }
+
+    // 로컬 스토리지에서 일정 불러오기
+    function loadSchedulesFromLocalStorage() {
+      try {
+        const storedSchedules = localStorage.getItem(LOCAL_STORAGE_SCHEDULES_KEY);
+        if (storedSchedules) {
+          schedules = JSON.parse(storedSchedules);
+          
+          if (schedules.length > 0) {
+            const maxId = schedules.reduce((max, schedule) => {
+              if (typeof schedule.id === 'string' && schedule.id.startsWith('schedule_')) {
+                const parts = schedule.id.split('_');
+                if (parts.length === 3) {
+                  const num = parseInt(parts[2], 10);
+                  return Math.max(max, num);
+                }
+              }
+              return max;
+            }, 0);
+            
+            nextScheduleId = maxId + 1;
+          }
+          
+          console.log(`로컬 스토리지에서 ${schedules.length}개 일정 불러오기 완료`);
+        } else {
+          console.log('로컬 스토리지에 저장된 일정 데이터가 없습니다.');
+        }
+      } catch (error) {
+        console.error('로컬 스토리지에서 일정 불러오기 중 오류:', error);
+      }
+    }
+
+    // 종합보고서 데이터 처리 함수
+    function processComprehensiveReportData(organizations, scheduleData) {
+      try {
+        CalendarDebugger.log('종합보고서 데이터 처리 시작', 'info', { organizations: organizations.length, schedules: scheduleData.length });
+        
+        const orgVisitCounts = {};
+        const orgLastVisit = {};
+        
+        scheduleData.forEach(schedule => {
+          const orgCode = schedule.orgCode || schedule.organizationCode;
+          const orgName = schedule.organizationName || schedule.orgName || (orgCode ? getOrganizationName(orgCode) : '알 수 없는 기관');
+          
+          if (!orgVisitCounts[orgName]) {
+            orgVisitCounts[orgName] = 0;
+          }
+          orgVisitCounts[orgName]++;
+          
+          const scheduleDate = schedule.scheduleDate || schedule.date || schedule.startDate;
+          if (scheduleDate) {
+            if (!orgLastVisit[orgName] || scheduleDate > orgLastVisit[orgName]) {
+              orgLastVisit[orgName] = scheduleDate;
+            }
+          }
+        });
+        
+        const topOrganizations = Object.entries(orgVisitCounts)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5)
+          .map(([name, count]) => ({ 
+            name, 
+            count, 
+            lastVisit: orgLastVisit[name] || '방문 기록 없음' 
+          }));
+        
+        const monthlyDistribution = {};
+        scheduleData.forEach(schedule => {
+          const scheduleDate = schedule.scheduleDate || schedule.date || schedule.startDate;
+          if (scheduleDate) {
+            const month = scheduleDate.substring(0, 7);
+            if (!monthlyDistribution[month]) {
+              monthlyDistribution[month] = 0;
+            }
+            monthlyDistribution[month]++;
+          }
+        });
+        
+        const reportData = {
+          totalOrganizations: organizations.length,
+          totalSchedules: scheduleData.length,
+          topOrganizations,
+          monthlyDistribution,
+          lastUpdated: new Date().toISOString()
+        };
+        
+        localStorage.setItem('comprehensive_report_data', JSON.stringify(reportData));
+        
+        CalendarDebugger.log('종합보고서 데이터 처리 완료', 'info', reportData);
+        
+        updateComprehensiveReportUI(reportData);
+        
+        return reportData;
+      } catch (error) {
+        CalendarDebugger.log('종합보고서 데이터 처리 중 오류 발생', 'error', error);
+        return null;
+      }
+    }
+
+    // 종합보고서 UI 업데이트 함수
+    function updateComprehensiveReportUI(reportData) {
+      try {
+        const reportContainer = document.getElementById('comprehensive-report-container');
+        if (!reportContainer) {
+          createComprehensiveReportUI();
+          return;
+        }
+        
+        const reportContent = document.getElementById('comprehensive-report-content');
+        if (reportContent) {
+          let topOrgsHTML = '';
+          reportData.topOrganizations.forEach((org, index) => {
+            topOrgsHTML += `
+              <div class="report-item">
+                <div class="report-rank">${index + 1}</div>
+                <div class="report-org-name">${org.name}</div>
+                <div class="report-visit-count">${org.count}회</div>
+                <div class="report-last-visit">${formatDate(org.lastVisit)}</div>
+              </div>
+            `;
+          });
+          
+          const months = Object.keys(reportData.monthlyDistribution).sort();
+          let monthlyHTML = '';
+          months.forEach(month => {
+            const count = reportData.monthlyDistribution[month];
+            const displayMonth = month.replace('-', '년 ') + '월';
+            monthlyHTML += `
+              <div class="monthly-item">
+                <div class="month-name">${displayMonth}</div>
+                <div class="month-bar">
+                  <div class="month-bar-fill" style="width: ${Math.min(count * 5, 100)}%"></div>
+                </div>
+                <div class="month-count">${count}건</div>
+              </div>
+            `;
+          });
+          
+          reportContent.innerHTML = `
+            <div class="report-summary">
+              <div class="summary-item">
+                <div class="summary-value">${reportData.totalOrganizations}</div>
+                <div class="summary-label">총 기관 수</div>
+              </div>
+              <div class="summary-item">
+                <div class="summary-value">${reportData.totalSchedules}</div>
+                <div class="summary-label">총 일정 수</div>
+              </div>
+              <div class="summary-item">
+                <div class="summary-value">${months.length}</div>
+                <div class="summary-label">활동 개월 수</div>
+              </div>
+            </div>
+            
+            <h3>방문 빈도 상위 기관</h3>
+            <div class="top-organizations">
+              <div class="report-header">
+                <div class="report-rank">순위</div>
+                <div class="report-org-name">기관명</div>
+                <div class="report-visit-count">방문 횟수</div>
+                <div class="report-last-visit">최근 방문일</div>
+              </div>
+              ${topOrgsHTML || '<div class="empty-data">데이터가 없습니다</div>'}
+            </div>
+            
+            <h3>월별 일정 분포</h3>
+            <div class="monthly-distribution">
+              ${monthlyHTML || '<div class="empty-data">데이터가 없습니다</div>'}
+            </div>
+            
+            <div class="report-footer">
+              마지막 업데이트: ${new Date(reportData.lastUpdated).toLocaleString()}
+            </div>
+          `;
+        }
+      } catch (error) {
+        CalendarDebugger.log('종합보고서 UI 업데이트 중 오류 발생', 'error', error);
+      }
+    }
+
+    // 종합보고서 UI 생성 함수
+    function createComprehensiveReportUI() {
+      try {
+        let reportContainer = document.getElementById('comprehensive-report-container');
+        
+        if (!reportContainer) {
+          reportContainer = document.createElement('div');
+          reportContainer.id = 'comprehensive-report-container';
+          reportContainer.className = 'report-container';
+          
+          const reportHeader = document.createElement('div');
+          reportHeader.className = 'report-header-bar';
+          reportHeader.innerHTML = `
+            <h2><i class="fas fa-chart-bar"></i> 종합보고서</h2>
+            <div class="report-actions">
+              <button id="refresh-report-btn" class="btn btn-sm btn-outline-primary">
+                <i class="fas fa-sync-alt"></i> 새로고침
+              </button>
+              <button id="close-report-btn" class="btn btn-sm btn-outline-secondary">
+                <i class="fas fa-times"></i>
+              </button>
+            </div>
+          `;
+          
+          const reportContent = document.createElement('div');
+          reportContent.id = 'comprehensive-report-content';
+          reportContent.className = 'report-content';
+          reportContent.innerHTML = '<div class="loading">보고서 데이터 로드 중...</div>';
+          
+          reportContainer.appendChild(reportHeader);
+          reportContainer.appendChild(reportContent);
+          
+          const calendarContainer = document.querySelector('.calendar-container');
+          if (calendarContainer) {
+            calendarContainer.appendChild(reportContainer);
+            
+            document.getElementById('refresh-report-btn').addEventListener('click', () => {
+              processComprehensiveReportData(organizations, schedules);
+            });
+            
+            document.getElementById('close-report-btn').addEventListener('click', () => {
+              reportContainer.style.display = 'none';
+            });
+            
+            const savedReportData = localStorage.getItem('comprehensive_report_data');
+            if (savedReportData) {
+              try {
+                const reportData = JSON.parse(savedReportData);
+                updateComprehensiveReportUI(reportData);
+              } catch (e) {
+                CalendarDebugger.log('저장된 보고서 데이터 파싱 오류', 'error', e);
+              }
+            }
+          } else {
+            CalendarDebugger.log('캘린더 컨테이너를 찾을 수 없음', 'error');
+          }
+        }
+      } catch (error) {
+        CalendarDebugger.log('종합보고서 UI 생성 중 오류 발생', 'error', error);
+      }
+    }
+
+    // 날짜 형식 변환 함수
+    function formatDate(dateString) {
+      if (!dateString || dateString === '방문 기록 없음') {
+        return dateString;
+      }
+      
+      try {
+        return dateString.replace(/^(\d{4})-(\d{2})-(\d{2})$/, '$1년 $2월 $3일');
+      } catch (e) {
+        return dateString;
+      }
+    }
+
+    // 특정 날짜로 이동 함수
+    function goToCalendarDate(dateString) {
+      try {
+        console.log(`날짜 이동 시도: ${dateString}`);
+        
+        const dateParts = dateString.split('-');
+        if (dateParts.length !== 3) {
+          console.error('날짜 형식이 잘못되었습니다. YYYY-MM-DD 형식이어야 합니다.');
+          return;
+        }
+        
+        const year = parseInt(dateParts[0]);
+        const month = parseInt(dateParts[1]) - 1;
+        const day = parseInt(dateParts[2]);
+        
+        const targetDate = new Date(year, month, day);
+        if (isNaN(targetDate.getTime())) {
+          console.error('유효하지 않은 날짜입니다.');
+          return;
+        }
+        
+        currentYear = year;
+        currentMonth = month;
+        currentDate = day;
+        renderCalendar(currentYear, currentMonth);
+        console.log(`캘린더 날짜 이동 완료: ${year}년 ${month + 1}월 ${day}일`);
+      } catch (error) {
+        console.error('날짜 이동 중 오류 발생:', error);
+      }
+    }
+
+    // 로딩 표시기 표시 함수
+    function showLoadingIndicator() {
+      const loadingIndicator = document.getElementById('loading-indicator');
+      if (loadingIndicator) {
+        loadingIndicator.style.display = 'flex';
+      }
+    }
+
+    // 로딩 표시기 숨김 함수
+    function hideLoadingIndicator() {
+      const loadingIndicator = document.getElementById('loading-indicator');
+      if (loadingIndicator) {
+        loadingIndicator.style.display = 'none';
+      }
+    }
+
+    // 알림 표시 함수
+    function showNotification(message, type = 'info') {
+      const notification = document.getElementById('notification');
+      if (notification) {
+        notification.textContent = message;
+        notification.className = `notification ${type}`;
+        notification.style.display = 'block';
+        
+        setTimeout(() => {
+          notification.style.display = 'none';
+        }, 5000);
+      }
     }
     
-    const colorBox = document.createElement('span');
-    colorBox.classList.add('color-box');
-    colorBox.style.backgroundColor = getCommitteeColor(committeeId);
+    // 일정 추가/수정 모달 열기 함수
+    async function openScheduleFormModal(dateString, scheduleId = null) {
+      try {
+        console.log('일정 폼 모달 열기 시작 - 날짜:', dateString, '일정 ID:', scheduleId);
+        
+        // 모든 모달창 닫기 (다른 모달이 열려있을 경우 닫기)
+        const allModals = document.querySelectorAll('.modal');
+        allModals.forEach(m => {
+          m.style.display = 'none';
+        });
+        
+        const modal = document.getElementById('schedule-form-modal');
+        const modalTitle = document.getElementById('schedule-form-title');
+        const form = document.getElementById('schedule-form');
+        const scheduleIdInput = document.getElementById('schedule-id');
+        const committeeSelect = document.getElementById('schedule-committee');
+        const organizationSelect = document.getElementById('schedule-organization');
+        const titleInput = document.getElementById('schedule-title');
+        const dateInput = document.getElementById('schedule-date');
+        const timeInput = document.getElementById('schedule-time');
+        const statusSelect = document.getElementById('schedule-status');
+        const notesInput = document.getElementById('schedule-notes');
+        
+        if (!modal || !form) {
+          console.error('일정 폼 모달 요소를 찾을 수 없습니다.');
+          return;
+        }
+        
+        // 폼 초기화
+        form.reset();
+        
+        // 날짜 설정
+        if (dateInput) {
+          dateInput.value = dateString;
+          console.log('날짜 입력 필드 값 설정:', dateString);
+        }
+        
+        // 위원회 옵션 설정
+        if (committeeSelect) {
+          committeeSelect.innerHTML = '<option value="">선택하세요</option>';
+            
+          // 실제 매칭 데이터에서 위원 정보 추출
+          const committeeMap = new Map(); // 위원명과 위원 ID를 매핑하기 위한 Map
+          
+          // 기본 위원 정보 설정 (폴백용)
+          const defaultCommittees = [
+            { id: 'C001', name: '신용기' },
+            { id: 'C002', name: '김수연' },
+            { id: 'C003', name: '문일지' },
+            { id: 'C004', name: '이연숙' },
+            { id: 'C005', name: '이정혜' }
+          ];
+          
+          // 매칭 데이터에서 위원 정보 추출
+          if (window.allMatchings && window.allMatchings.length > 0) {
+            console.log('매칭 데이터에서 위원 정보 추출 시도:', window.allMatchings.length + '개 항목');
+            
+            window.allMatchings.forEach(match => {
+              // 영문 필드명 데이터 형식
+              if (match.committeeId && match.committeeName) {
+                committeeMap.set(match.committeeName, match.committeeId);
+              }
+              
+              // 한글 필드명 데이터 형식
+              if (match.위원ID && match.위원명) {
+                committeeMap.set(match.위원명, match.위원ID);
+              }
+            });
+          }
+          
+          // API 응답 데이터 원본 확인
+          if (committeeMap.size === 0 && window.api && window.api.committees && typeof window.api.committees.getRawData === 'function') {
+            try {
+              // 원본 데이터에서 위원 정보 추출 (비동기 처리)
+              let rawData = null;
+              try {
+                rawData = await window.api.committees.getRawData();
+                console.log('[DEBUG] 원본 데이터 로드 성공:', rawData ? '데이터 있음' : '데이터 없음');
+              } catch (error) {
+                console.error('[DEBUG] 원본 데이터 로드 중 오류:', error);
+              }
+              
+              if (rawData && rawData.data && Array.isArray(rawData.data.rows)) {
+                console.log('원본 데이터에서 위원 정보 추출 시도:', rawData.data.rows.length + '개 행');
+                
+                // 모든 행에서 위원 ID와 이름 추출
+                rawData.data.rows.forEach((row, index) => {
+                  if (row && row.length > 1 && row[0] && row[1]) {
+                    const committeeId = row[0]; // 위원 ID는 첫 번째 열
+                    const committeeName = row[1]; // 위원명은 두 번째 열
+                    committeeMap.set(committeeName, committeeId);
+                  }
+                });
+              }
+            } catch (error) {
+              console.error('원본 데이터에서 위원 정보 추출 중 오류:', error);
+            }
+          }
+          
+          // 위원 데이터가 없는 경우 폴백 데이터 사용
+          if (committeeMap.size === 0) {
+            console.log('위원 데이터가 없습니다. 기본 위원 목록을 사용합니다.');
+            defaultCommittees.forEach(committee => {
+              committeeMap.set(committee.name, committee.id);
+            });
+          }
+          
+          console.log('추출된 전체 위원 정보:', Array.from(committeeMap.entries()));
+          console.log('매칭 데이터에서 추출한 위원 수:', committeeMap.size);
+          
+          // 위원 옵션 추가 (이름 알파벳 순 정렬)
+          Array.from(committeeMap.entries())
+            .sort((a, b) => a[0].localeCompare(b[0], 'ko'))
+            .forEach(([name, id]) => {
+              const option = document.createElement('option');
+              option.value = id;
+              option.textContent = name;
+              option.dataset.committeeId = id; // 데이터 속성에 위원 ID 저장
+              committeeSelect.appendChild(option);
+            });
+          
+          // 위원 변경 이벤트 처리
+          committeeSelect.addEventListener('change', function() {
+            const selectedCommitteeName = committeeSelect.options[committeeSelect.selectedIndex].text;
+            
+            try {
+              // 기관 선택 초기화
+              organizationSelect.innerHTML = '<option value="">기관 선택</option>';
+              
+              // getCommitteePrimaryOrgs 함수로 주담당 기관 코드 가져오기
+              const matchedOrgCodes = getCommitteePrimaryOrgs(selectedCommitteeName);
+              let filteredOrgs = [];
+              
+              console.log(`${selectedCommitteeName} 위원의 주담당 기관 코드:`, matchedOrgCodes);
+              
+              if (matchedOrgCodes.length > 0) {
+                // 주담당 기관만 필터링
+                filteredOrgs = organizations.filter(org => 
+                  matchedOrgCodes.includes(org.code || org.id)
+                );
+                
+                // 주담당 기관이 없으면 전체 기관 표시
+                if (filteredOrgs.length === 0) {
+                  console.log(`${selectedCommitteeName} 위원의 주담당 기관이 없어 전체 기관 표시`);
+                  filteredOrgs = organizations;
+                }
+              }
+              
+              console.log(`${selectedCommitteeName} 위원의 매칭 정보:`, {
+                matchedOrgCodes: matchedOrgCodes,
+                allMatchingsLength: window.allMatchings ? window.allMatchings.length : 0
+              });
+              
+              // 기관 목록 정렬 (기관명 알파벳 순)
+            filteredOrgs.sort((a, b) => {
+              const nameA = a.name || '';
+              const nameB = b.name || '';
+              return nameA.localeCompare(nameB);
+            });
+            
+            // 기관 옵션 추가
+            filteredOrgs.forEach(org => {
+              if (org && (org.code || org.id) && org.name) {
+                const option = document.createElement('option');
+                option.value = org.code || org.id;
+                option.textContent = org.name;
+                organizationSelect.appendChild(option);
+              }
+            });
+          } catch (error) {
+            console.error('위원 변경 이벤트 처리 중 오류:', error);
+            filteredOrgs = organizations;
+          }
+          });
+          
+          // 현재 사용자가 위원인 경우 자동 선택
+          if (currentUser && currentUser.role === 'committee' && currentUser.id) {
+            committeeSelect.value = currentUser.id;
+            
+            // 위원 변경 이벤트 트리거하여 기관 목록 자동 업데이트
+            const changeEvent = new Event('change');
+            committeeSelect.dispatchEvent(changeEvent);
+          }
+        }
+        
+        // 위원 변경 시 기관 옵션 업데이트 (추가 기능)
+        if (committeeSelect) {
+          // 기존 이벤트 리스너 제거 (중복 등록 방지)
+          const oldListeners = committeeSelect.getEventListeners ? committeeSelect.getEventListeners('change') : [];
+          if (oldListeners && oldListeners.length > 0) {
+            oldListeners.forEach(listener => {
+              committeeSelect.removeEventListener('change', listener);
+            });
+          } else {
+            // 이벤트 리스너 클론 생성 (이전 리스너 제거를 위해)
+            committeeSelect.oldChangeListener = committeeSelect.oldChangeListener || function() {};
+            committeeSelect.removeEventListener('change', committeeSelect.oldChangeListener);
+          }
+          
+          // 새 이벤트 리스너 등록
+          committeeSelect.oldChangeListener = function() {
+            const selectedCommitteeName = committeeSelect.options[committeeSelect.selectedIndex]?.text || '';
+            const selectedCommitteeId = committeeSelect.value || '';
+            
+            if (!selectedCommitteeName || selectedCommitteeName === '선택하세요') {
+              console.log('유효한 위원이 선택되지 않았습니다.');
+              return;
+            }
+            
+            console.log(`위원 선택 변경 감지: ${selectedCommitteeName} (${selectedCommitteeId})`);
+            
+            // 기관 선택 초기화
+            if (organizationSelect) {
+              organizationSelect.innerHTML = '<option value="">선택하세요</option>';
+              
+              try {
+                // 위원의 주담당 기관 코드 가져오기
+                const matchedOrgCodes = getCommitteePrimaryOrgs(selectedCommitteeName);
+                console.log(`${selectedCommitteeName} 위원의 주담당 기관 코드:`, matchedOrgCodes);
+                
+                // 매칭된 기관 필터링 및 표시
+                updateOrganizationOptions(organizationSelect, matchedOrgCodes, selectedCommitteeName);
+                
+                // 저장된 기관 코드가 있는 경우 선택 시도
+                if (window.pendingOrgCode) {
+                  setTimeout(() => {
+                    console.log('저장된 기관 코드로 선택 시도:', window.pendingOrgCode);
+                    for (let i = 0; i < organizationSelect.options.length; i++) {
+                      if (organizationSelect.options[i].value === window.pendingOrgCode) {
+                        organizationSelect.selectedIndex = i;
+                        console.log('기관 선택 완료:', organizationSelect.options[i].text);
+                        break;
+                      }
+                    }
+                  }, 300);
+                }
+              } catch (error) {
+                console.error(`위원 변경 이벤트 처리 중 오류:`, error);
+              }
+            }
+          };
+          
+          // 새 이벤트 리스너 등록
+          committeeSelect.addEventListener('change', committeeSelect.oldChangeListener);
+        }
+        
+        // 기관 옵션 업데이트 함수 (재사용을 위해 함수로 분리)
+        async function updateOrganizationOptions(selectElement, matchedOrgCodes = [], committeeName = '') {
+          // 모든 기관 데이터 수집
+          const allOrgs = new Set();
+          
+          // 매칭 데이터에서 기관 정보 추출
+          if (window.allMatchings && window.allMatchings.length > 0) {
+            window.allMatchings.forEach(match => {
+              if (match.orgCode && match.orgName) {
+                allOrgs.add(JSON.stringify({
+                  code: match.orgCode,
+                  name: match.orgName,
+                  region: match.region || ''
+                }));
+              } else if (match.기관코드 && match.기관명) {
+                allOrgs.add(JSON.stringify({
+                  code: match.기관코드,
+                  name: match.기관명,
+                  region: match.지역 || ''
+                }));
+              }
+            });
+          }
+          
+          // API 원본 데이터에서 기관 정보 추출 (비동기 처리)
+          let rawData = null;
+          try {
+            if (window.api && window.api.committees && typeof window.api.committees.getRawData === 'function') {
+              rawData = await window.api.committees.getRawData();
+              console.log('[DEBUG] 기관 정보용 원본 데이터 로드 성공:', rawData ? '데이터 있음' : '데이터 없음');
+            }
+          } catch (error) {
+            console.error('[DEBUG] 기관 정보용 원본 데이터 로드 중 오류:', error);
+          }
+          
+          if (rawData && rawData.data && Array.isArray(rawData.data.rows)) {
+            rawData.data.rows.forEach(row => {
+              if (row && row.length > 3 && row[3] && row[4]) {
+                allOrgs.add(JSON.stringify({
+                  code: row[3],
+                  name: row[4],
+                  region: row[5] || ''
+                }));
+              }
+            });
+          }
+          
+          // 기본 기관 데이터는 실제 데이터가 없을 경우에만 사용
+          if (allOrgs.size === 0 && organizations && organizations.length > 0) {
+            organizations.forEach(org => {
+              if (org.code || org.id) {
+                allOrgs.add(JSON.stringify({
+                  code: org.code || org.id,
+                  name: org.name,
+                  region: org.region || ''
+                }));
+              }
+            });
+          }
+          
+          // JSON 문자열을 객체로 변환
+          const realOrganizations = Array.from(allOrgs).map(org => JSON.parse(org));
+          console.log('사용 가능한 기관 수:', realOrganizations.length);
+          
+          // 매칭된 기관만 필터링 (있는 경우)
+          let filteredOrgs = realOrganizations;
+          if (matchedOrgCodes && matchedOrgCodes.length > 0) {
+            filteredOrgs = realOrganizations.filter(org => 
+              matchedOrgCodes.includes(org.code)
+            );
+            
+            // 매칭된 기관이 없으면 전체 기관 표시
+            if (filteredOrgs.length === 0) {
+              console.log(committeeName ? `${committeeName} 위원에게 매칭된 기관이 없어 전체 기관 표시` : '매칭된 기관이 없어 전체 기관 표시');
+              filteredOrgs = realOrganizations;
+            }
+          }
+          
+          // 기관 목록 정렬 (기관명 알파벳 순)
+          filteredOrgs.sort((a, b) => {
+            const nameA = a.name || '';
+            const nameB = b.name || '';
+            return nameA.localeCompare(nameB, 'ko');
+          });
+          
+          // 기관 옵션 추가
+          filteredOrgs.forEach(org => {
+            if (org && org.code && org.name) {
+              const option = document.createElement('option');
+              option.value = org.code;
+              option.textContent = org.region ? `${org.name} (${org.region})` : org.name;
+              selectElement.appendChild(option);
+            }
+          });
+          
+          return filteredOrgs.length;
+        }
+        
+        
+        // 기관 옵션 설정
+        if (organizationSelect) {
+          organizationSelect.innerHTML = '<option value="">선택하세요</option>';
+          
+          // 선택된 위원에 따른 기관 목록 필터링
+          const selectedCommittee = committeeSelect.value;
+          const organizations = new Set();
+          if (window.allMatchings && window.allMatchings.length > 0) {
+            window.allMatchings.forEach(match => {
+              // 영문 필드명 형식
+              if (match.orgCode && match.orgName) {
+                organizations.add(JSON.stringify({
+                  code: match.orgCode,
+                  name: match.orgName,
+                  region: match.region || ''
+                }));
+              }
+              
+              // 한글 필드명 형식
+              if (match.기관코드 && match.기관명) {
+                organizations.add(JSON.stringify({
+                  code: match.기관코드,
+                  name: match.기관명,
+                  region: match.지역 || ''
+                }));
+              }
+            });
+          }
+          
+          // API 원본 데이터에서 기관 정보 추출
+          const rawData = window.api && window.api.committees && 
+                         typeof window.api.committees.getRawData === 'function' && 
+                         window.api.committees.getRawData();
+                         
+          if (rawData && rawData.data && Array.isArray(rawData.data.rows)) {
+            rawData.data.rows.forEach(row => {
+              if (row && row.length > 3 && row[3] && row[4]) {
+                organizations.add(JSON.stringify({
+                  code: row[3], // 기관코드는 네 번째 열
+                  name: row[4], // 기관명은 다섯 번째 열
+                  region: row[5] || '' // 지역은 여섯 번째 열
+                }));
+              }
+            });
+          }
+          
+          // JSON 문자열을 객체로 변환
+          const realOrganizations = Array.from(organizations).map(org => JSON.parse(org));
+          console.log('추출된 전체 기관 수:', realOrganizations.length);
+          
+          // 위원과 기관 매칭 정보 확인
+          let filteredOrgs = realOrganizations;
+          const selectedCommitteeName = committeeSelect && committeeSelect.selectedIndex > 0 ? 
+                                      committeeSelect.options[committeeSelect.selectedIndex].text : '';
+          
+          if (selectedCommitteeName) {
+            try {
+              console.log(`선택된 위원: ${selectedCommitteeName}, 매칭 정보 확인`);
+              
+              // getCommitteePrimaryOrgs 함수를 사용하여 주담당 기관 코드 가져오기
+              const matchedOrgCodes = getCommitteePrimaryOrgs(selectedCommitteeName);
+              
+              if (matchedOrgCodes.length > 0) {
+                console.log(`${selectedCommitteeName} 위원이 주담당인 기관 코드:`, matchedOrgCodes);
+                
+                // 매칭된 기관만 필터링
+                filteredOrgs = realOrganizations.filter(org => 
+                  matchedOrgCodes.includes(org.code)
+                );
+                
+                // 매칭된 기관이 없으면 전체 기관 표시
+                if (filteredOrgs.length === 0) {
+                  console.log(`${selectedCommitteeName} 위원에게 매칭된 기관이 없어 전체 기관 표시`);
+                  filteredOrgs = realOrganizations;
+                }
+              } else {
+                console.log(`${selectedCommitteeName} 위원이 주담당인 기관이 없습니다.`);
+              }
+            } catch (error) {
+              console.error(`위원에 대한 기관 매칭 정보 처리 중 오류:`, error);
+            }
+          }
+          
+          // 기관 목록 정렬 (기관명 알파벳 순)
+          filteredOrgs.sort((a, b) => {
+            const nameA = a.name || '';
+            const nameB = b.name || '';
+            return nameA.localeCompare(nameB, 'ko');
+          });
+          
+          // 기관 옵션 추가
+          filteredOrgs.forEach(org => {
+            if (org && org.code && org.name) {
+              const option = document.createElement('option');
+              option.value = org.code;
+              option.textContent = org.region ? `${org.name} (${org.region})` : org.name;
+              organizationSelect.appendChild(option);
+            }
+          });
+          
+          // 기관 목록이 없는 경우 안내 메시지
+          if (organizationSelect.options.length <= 1) {
+            console.warn('기관 목록을 가져오지 못했습니다. 데이터를 확인해주세요.');
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = '기관 데이터를 불러올 수 없습니다';
+            option.disabled = true;
+            organizationSelect.appendChild(option);
+          }
+        }
+        
+        // 기존 일정 수정인 경우
+        if (scheduleId) {
+          const schedule = schedules.find(s => s.id === scheduleId);
+          if (schedule) {
+            modalTitle.textContent = '일정 수정';
+            scheduleIdInput.value = schedule.id;
+            
+            // 기존 일정 정보를 window.existingScheduleToLoad에 저장
+            window.existingScheduleToLoad = schedule;
+            console.log('기존 일정 정보 저장:', window.existingScheduleToLoad);
+            
+            // 위원 선택
+            if (committeeSelect) {
+              const committeeId = schedule.committeeId || '';
+              const committeeName = schedule.committeeName || '';
+              
+              console.log('기존 일정의 위원 정보:', committeeId, committeeName);
+              
+              // 위원 ID로 먼저 시도
+              let found = false;
+              if (committeeId) {
+                for (let i = 0; i < committeeSelect.options.length; i++) {
+                  if (committeeSelect.options[i].value === committeeId) {
+                    committeeSelect.selectedIndex = i;
+                    console.log('위원 ID로 선택 완료:', committeeSelect.options[i].text);
+                    found = true;
+                    break;
+                  }
+                }
+              }
+              
+              // 위원 ID로 찾지 못하면 위원명으로 시도
+              if (!found && committeeName) {
+                for (let i = 0; i < committeeSelect.options.length; i++) {
+                  if (committeeSelect.options[i].text === committeeName) {
+                    committeeSelect.selectedIndex = i;
+                    console.log('위원명으로 선택 완료:', committeeSelect.options[i].text);
+                    found = true;
+                    break;
+                  }
+                }
+              }
+              
+              // 위원 선택 변경 이벤트 수동 호출
+              if (found) {
+                const changeEvent = new Event('change');
+                committeeSelect.dispatchEvent(changeEvent);
+                
+                // 기관 선택을 위한 전역 변수 설정
+                window.pendingOrgCode = schedule.orgCode || schedule.organizationCode || '';
+                console.log('기존 일정의 기관 코드 저장:', window.pendingOrgCode);
+                
+                // 기관 선택 지연 설정 (위원 변경 이벤트가 처리된 후)
+                setTimeout(() => {
+                  if (organizationSelect && window.pendingOrgCode) {
+                    console.log('기존 일정의 기관 정보 설정 시도:', window.pendingOrgCode);
+                    
+                    // 기관 선택이 없는 경우 처리
+                    if (organizationSelect.options.length <= 1) {
+                      console.warn('기관 선택지 없음: 위원에 매칭된 기관이 없거나 아직 로드되지 않았습니다.');
+                      return;
+                    }
+                    
+                    // 기관 코드에 매칭되는 옵션 찾기
+                    let found = false;
+                    for (let i = 0; i < organizationSelect.options.length; i++) {
+                      if (organizationSelect.options[i].value === window.pendingOrgCode) {
+                        organizationSelect.selectedIndex = i;
+                        console.log('기관 선택 완료:', organizationSelect.options[i].text);
+                        found = true;
+                        break;
+                      }
+                    }
+                    
+                    // 매칭되는 기관이 없는 경우 처리
+                    if (!found && organizationSelect.options.length > 1) {
+                      console.warn('일치하는 기관 코드를 찾지 못함:', window.pendingOrgCode);
+                      console.log('처음 발견된 기관으로 설정');
+                      organizationSelect.selectedIndex = 1; // 첫 번째 유효한 기관 선택
+                    }
+                    
+                    // 전역 변수 초기화
+                    window.pendingOrgCode = null;
+                  }
+                }, 800); // 위원 변경 이벤트가 처리되고 기관 목록이 업데이트될 시간 여유 확보
+              } else {
+                // 위원을 찾지 못한 경우 직접 값 설정
+                committeeSelect.value = committeeId || '';
+                if (organizationSelect) {
+                  organizationSelect.value = schedule.orgCode || schedule.organizationCode || '';
+                }
+              }
+            } else if (organizationSelect) {
+              // committeeSelect가 없는 경우 직접 기관 설정
+              organizationSelect.value = schedule.orgCode || schedule.organizationCode || '';
+            }
+            if (titleInput) titleInput.value = schedule.title || '';
+            if (dateInput) dateInput.value = schedule.scheduleDate || schedule.date || schedule.startDate || dateString;
+            if (timeInput) timeInput.value = schedule.time || '';
+            if (statusSelect) statusSelect.value = schedule.status || 'pending';
+            if (notesInput) notesInput.value = schedule.notes || '';
+            
+            // 삭제 버튼 표시
+            const deleteBtn = document.getElementById('delete-schedule-btn');
+            if (deleteBtn) {
+              deleteBtn.style.display = 'inline-block';
+            }
+          }
+        } else {
+          // 새 일정 추가인 경우
+          modalTitle.textContent = '일정 추가';
+          scheduleIdInput.value = '';
+          
+          // 기본값 설정
+          if (statusSelect) statusSelect.value = 'pending';
+          
+          // 삭제 버튼 숨김
+          const deleteBtn = document.getElementById('delete-schedule-btn');
+          if (deleteBtn) {
+            deleteBtn.style.display = 'none';
+          }
+        }
+        
+        // 모달 표시
+        modal.style.display = 'block';
+        console.log('일정 추가/수정 모달 표시 완료');
+        
+        // 모달 닫기 버튼 이벤트 리스너 추가
+        const closeBtn = modal.querySelector('.close-modal');
+        if (closeBtn) {
+          closeBtn.addEventListener('click', () => {
+            modal.style.display = 'none';
+          });
+        }
+        
+        // 모달 외부 클릭 시 닫기
+        const closeModalOnOutsideClick = (e) => {
+          if (e.target === modal) {
+            modal.style.display = 'none';
+            window.removeEventListener('click', closeModalOnOutsideClick);
+          }
+        };
+        window.addEventListener('click', closeModalOnOutsideClick);
+      } catch (error) {
+        console.error('일정 폼 모달 열기 중 오류:', error);
+      }
+    }
     
-    const nameLabel = document.createElement('span');
-    nameLabel.textContent = committeeName;
+    // 날짜별 일정 모달 표시 함수
+    function showDateSchedules(dateString) {
+      try {
+        const dateSchedules = schedules.filter(schedule => {
+          const scheduleDate = schedule.scheduleDate || schedule.date || schedule.startDate;
+          return scheduleDate === dateString;
+        });
+        
+        const modal = document.getElementById('schedules-list-modal');
+        const modalTitle = document.getElementById('schedules-list-modal-title');
+        const schedulesList = document.getElementById('schedules-list');
+        
+        if (!modal || !modalTitle || !schedulesList) {
+          console.error('일정 목록 모달 요소를 찾을 수 없습니다.');
+          return;
+        }
+        
+        const formattedDate = dateString.replace(/^(\d{4})-(\d{2})-(\d{2})$/, '$1년 $2월 $3일');
+        modalTitle.textContent = `${formattedDate} 일정`;
+        
+        schedulesList.innerHTML = '';
+        
+        // 일정 추가 버튼 추가
+        const addButtonContainer = document.createElement('div');
+        addButtonContainer.className = 'add-schedule-container';
+        addButtonContainer.innerHTML = `
+          <button id="add-schedule-btn" class="btn btn-primary">
+            <i class="fas fa-plus"></i> 새 일정 추가
+          </button>
+        `;
+        schedulesList.appendChild(addButtonContainer);
+        
+        // 일정 추가 버튼 클릭 이벤트
+        document.getElementById('add-schedule-btn').addEventListener('click', () => {
+          openScheduleFormModal(dateString);
+          modal.style.display = 'none'; // 목록 모달 닫기
+        });
+        
+        if (dateSchedules.length === 0) {
+          const emptyMessage = document.createElement('div');
+          emptyMessage.className = 'empty-message';
+          emptyMessage.innerHTML = `
+            <i class="fas fa-calendar-times"></i>
+            <p>이 날짜에 등록된 일정이 없습니다.</p>
+          `;
+          schedulesList.appendChild(emptyMessage);
+        } else {
+          const countInfo = document.createElement('div');
+          countInfo.className = 'schedule-count';
+          countInfo.innerHTML = `총 <strong>${dateSchedules.length}</strong>개의 일정`;
+          schedulesList.appendChild(countInfo);
+          
+          // 일정 목록 추가
+          dateSchedules.forEach(schedule => {
+            const scheduleItem = document.createElement('div');
+            scheduleItem.classList.add('schedule-item');
+            scheduleItem.dataset.id = schedule.id;
+            
+            if (schedule.status === 'completed') {
+              scheduleItem.classList.add('completed');
+            } else if (schedule.status === 'pending') {
+              scheduleItem.classList.add('pending');
+            } else if (schedule.status === 'canceled') {
+              scheduleItem.classList.add('canceled');
+            }
+            
+            let orgName = '';
+            if (schedule.organizationName) {
+              orgName = schedule.organizationName;
+            } else if (schedule.orgName) {
+              orgName = schedule.orgName;
+            } else if (schedule.orgCode || schedule.organizationCode) {
+              const orgCode = schedule.orgCode || schedule.organizationCode;
+              orgName = getOrganizationName(orgCode);
+            } else {
+              orgName = '기관 미지정';
+            }
+            
+            let committeeName = schedule.committeeName || '담당자 미지정';
+            let timeInfo = schedule.time || '종일';
+            const title = schedule.title || `${orgName} 방문`;
+            
+            let statusText = '';
+            let statusClass = '';
+            
+            if (schedule.status === 'completed') {
+              statusText = '완료';
+              statusClass = 'completed';
+            } else if (schedule.status === 'pending') {
+              statusText = '예정';
+              statusClass = 'pending';
+            } else if (schedule.status === 'canceled') {
+              statusText = '취소';
+              statusClass = 'canceled';
+            }
+            
+            const committeeColor = getCommitteeColor(schedule.committeeId);
+            const dotColor = schedule.status === 'completed' ? '#4caf50' : 
+                           schedule.status === 'pending' ? '#ffc107' : 
+                           schedule.status === 'canceled' ? '#f44336' : 
+                           committeeColor;
+            
+            scheduleItem.innerHTML = `
+              <div class="schedule-header">
+                <div class="schedule-dot" style="background-color: ${dotColor};"></div>
+                <div class="schedule-title">${title}</div>
+                ${statusText ? `<span class="status-badge ${statusClass}">${statusText}</span>` : ''}
+              </div>
+              <div class="schedule-details">
+                <div class="schedule-time"><i class="far fa-clock"></i> ${timeInfo}</div>
+                <div class="schedule-info">
+                  <span class="committee"><i class="far fa-user"></i> ${committeeName}</span>
+                  <span class="org"><i class="far fa-building"></i> ${orgName}</span>
+                </div>
+                ${schedule.notes ? `<div class="schedule-notes">${schedule.notes}</div>` : ''}
+              </div>
+              <div class="schedule-actions">
+                <button class="btn btn-sm btn-primary edit-btn"><i class="fas fa-edit"></i> 수정</button>
+                <button class="btn btn-sm btn-danger delete-btn"><i class="fas fa-trash-alt"></i> 삭제</button>
+              </div>
+            `;
+            
+            schedulesList.appendChild(scheduleItem);
+            
+            // 수정 버튼 클릭 이벤트
+            const editBtn = scheduleItem.querySelector('.edit-btn');
+            if (editBtn) {
+              editBtn.addEventListener('click', () => {
+                openScheduleFormModal(dateString, schedule.id);
+                modal.style.display = 'none';
+              });
+            }
+            
+            // 삭제 버튼 클릭 이벤트
+            const deleteBtn = scheduleItem.querySelector('.delete-btn');
+            if (deleteBtn) {
+              deleteBtn.addEventListener('click', () => {
+                if (confirm('정말로 이 일정을 삭제하시겠습니까?')) {
+                  const index = schedules.findIndex(s => s.id === schedule.id);
+                  if (index !== -1) {
+                    schedules.splice(index, 1);
+                    saveSchedulesToLocalStorage();
+                    showNotification('일정이 삭제되었습니다.', 'success');
+                    renderCalendar(currentYear, currentMonth);
+                    modal.style.display = 'none';
+                  }
+                }
+              });
+            }
+          });
+        }
+        
+        modal.style.display = 'block';
+        
+        // 이벤트 발생
+        const event = new CustomEvent('date-cell-click', {
+          detail: { date: dateString }
+        });
+        document.dispatchEvent(event);
+      } catch (error) {
+        console.error('날짜별 일정 모달 표시 중 오류:', error);
+      }
+    }
     
-    // 색상 견본 배경으로 보여주기
-    const sampleBackground = document.createElement('span');
-    sampleBackground.classList.add('color-sample');
-    sampleBackground.style.backgroundColor = `${getCommitteeColor(committeeId)}20`;
-    sampleBackground.textContent = '예시';
+    // 일정 저장 함수
+    function saveSchedule() {
+      try {
+        const form = document.getElementById('schedule-form');
+        const scheduleIdInput = document.getElementById('schedule-id');
+        const committeeSelect = document.getElementById('schedule-committee');
+        const organizationSelect = document.getElementById('schedule-organization');
+        const titleInput = document.getElementById('schedule-title');
+        const dateInput = document.getElementById('schedule-date');
+        const timeInput = document.getElementById('schedule-time');
+        const statusSelect = document.getElementById('schedule-status');
+        const notesInput = document.getElementById('schedule-notes');
+        
+        // 필수 입력값 검증
+        if (!dateInput || !dateInput.value) {
+          showNotification('날짜를 입력해주세요.', 'error');
+          return;
+        }
+        
+        if (!committeeSelect || !committeeSelect.value) {
+          showNotification('담당 위원을 선택해주세요.', 'error');
+          return;
+        }
+        
+        // 일정 데이터 생성
+        const scheduleData = {
+          committeeId: committeeSelect.value,
+          committeeName: committeeSelect.options[committeeSelect.selectedIndex].text,
+          scheduleDate: dateInput.value,
+          // 날짜 필드 추가 - 다른 페이지와 호환성을 위해
+          date: dateInput.value,
+          visitDate: dateInput.value,
+          time: timeInput ? timeInput.value : '',
+          startTime: timeInput ? timeInput.value.split('-')[0].trim() : '미지정',
+          endTime: timeInput && timeInput.value.includes('-') ? timeInput.value.split('-')[1].trim() : '미지정',
+          status: statusSelect ? statusSelect.value : 'pending',
+          notes: notesInput ? notesInput.value : '',
+          memo: notesInput ? notesInput.value : ''
+        };
+        
+        // 기관 정보 추가
+        if (organizationSelect && organizationSelect.value) {
+          scheduleData.orgCode = organizationSelect.value;
+          scheduleData.organizationName = organizationSelect.options[organizationSelect.selectedIndex].text;
+        }
+        
+        // 제목 설정
+        if (titleInput && titleInput.value) {
+          scheduleData.title = titleInput.value;
+        } else if (scheduleData.organizationName) {
+          scheduleData.title = `${scheduleData.organizationName} 방문`;
+        } else {
+          scheduleData.title = '일정';
+        }
+        
+        // 기존 일정 수정인 경우
+        if (scheduleIdInput && scheduleIdInput.value) {
+          const scheduleId = scheduleIdInput.value;
+          const index = schedules.findIndex(s => s.id === scheduleId);
+          
+          if (index !== -1) {
+            // 기존 일정 업데이트
+            scheduleData.id = scheduleId;
+            schedules[index] = { ...schedules[index], ...scheduleData };
+            showNotification('일정이 수정되었습니다.', 'success');
+          }
+        } else {
+          // 새 일정 추가
+          scheduleData.id = `schedule_${Date.now()}`;
+          schedules.push(scheduleData);
+          showNotification('새 일정이 추가되었습니다.', 'success');
+        }
+        
+        // 로컬 스토리지에 저장
+        saveSchedulesToLocalStorage();
+        
+        // 마스터 대시보드 데이터 업데이트 이벤트 발생
+        // 일정 변경사항을 다른 페이지에도 반영
+        document.dispatchEvent(new CustomEvent('masterDashboardDataUpdated', {
+          detail: {
+            type: scheduleIdInput && scheduleIdInput.value ? 'update' : 'add',
+            data: scheduleData
+          }
+        }));
+        
+        // 캘린더 다시 렌더링
+        renderCalendar(currentYear, currentMonth);
+        
+        // 모달 닫기
+        const modal = document.getElementById('schedule-form-modal');
+        if (modal) {
+          modal.style.display = 'none';
+        }
+      } catch (error) {
+        console.error('일정 저장 중 오류:', error);
+        showNotification('일정 저장 중 오류가 발생했습니다.', 'error');
+      }
+    }
     
-    legendItem.appendChild(colorBox);
-    legendItem.appendChild(nameLabel);
-    legendItem.appendChild(sampleBackground);
+    // 일정 삭제 함수
+    function deleteSchedule() {
+      try {
+        const scheduleIdInput = document.getElementById('schedule-id');
+        
+        if (!scheduleIdInput || !scheduleIdInput.value) {
+          showNotification('삭제할 일정을 찾을 수 없습니다.', 'error');
+          return;
+        }
+        
+        const scheduleId = scheduleIdInput.value;
+        const index = schedules.findIndex(s => s.id === scheduleId);
+        
+        if (index !== -1) {
+          // 일정 삭제 확인
+          if (confirm('정말로 이 일정을 삭제하시겠습니까?')) {
+            schedules.splice(index, 1);
+            
+            // 로컬 스토리지에 저장
+            saveSchedulesToLocalStorage();
+            
+            // 캘린더 다시 렌더링
+            renderCalendar(currentYear, currentMonth);
+            
+            showNotification('일정이 삭제되었습니다.', 'success');
+            
+            // 모달 닫기
+            const modal = document.getElementById('schedule-form-modal');
+            if (modal) {
+              modal.style.display = 'none';
+            }
+          }
+        } else {
+          showNotification('삭제할 일정을 찾을 수 없습니다.', 'error');
+        }
+      } catch (error) {
+        console.error('일정 삭제 중 오류:', error);
+        showNotification('일정 삭제 중 오류가 발생했습니다.', 'error');
+      }
+    }
+
+    // 전역 함수로 등록
+    window.goToCalendarDate = goToCalendarDate;
+    window.processComprehensiveReport = processComprehensiveReportData;
+
+    // 캘린더 객체 반환
+    calendar.init = init;
+    calendar.renderCalendar = renderCalendar;
+    calendar.getOrganizationName = getOrganizationName;
+    calendar.mapCommitteeName = mapCommitteeName;
+    calendar.getSchedules = getSchedules;
+    calendar.getCommittees = getCommittees;
+    calendar.getOrganizations = getOrganizations;
+    calendar.setupEventListeners = setupEventListeners;
+    calendar.showLoadingIndicator = showLoadingIndicator;
+    calendar.hideLoadingIndicator = hideLoadingIndicator;
+    calendar.showNotification = showNotification;
+    calendar.goToCalendarDate = goToCalendarDate;
+    calendar.showDateSchedules = showDateSchedules;
+    calendar.saveSchedulesToLocalStorage = saveSchedulesToLocalStorage;
+    calendar.loadSchedulesFromLocalStorage = loadSchedulesFromLocalStorage;
+    calendar.processComprehensiveReportData = processComprehensiveReportData;
+    calendar.showScheduleDetail = showScheduleDetail;
+    calendar.openScheduleFormModal = openScheduleFormModal;
     
-    return legendItem;
+    return calendar;
   }
-  
-  // 초기화 함수 호출
-  initialize();
-});
+
+  // DOM이 로드되면 캠린더 기능 설정
+  document.addEventListener('DOMContentLoaded', function() {
+    CalendarDebugger.log('캠린더 DOM 로드 완료');
+    
+    // 현재 페이지가 캠린더 페이지인지 확인
+    const isCalendarPage = document.getElementById('calendar-grid') !== null && 
+                          document.getElementById('month-year') !== null;
+    
+    if (!isCalendarPage) {
+      CalendarDebugger.log('캠린더 페이지가 아닙니다. 캠린더 초기화를 건너뚠니다.', 'info');
+      return; // 캠린더 페이지가 아니면 초기화를 건너뚠
+    }
+    
+    // 필요한 DOM 요소가 있는지 확인
+    const hasCalendarGrid = CalendarDebugger.checkElement('#calendar-grid', '캠린더 그리드');
+    const hasMonthYear = CalendarDebugger.checkElement('#month-year', '년월 화면');
+    
+    if (!hasCalendarGrid || !hasMonthYear) {
+      CalendarDebugger.log('필수 캠린더 요소가 없습니다. 캠린더 초기화를 건너뚠니다.', 'warning');
+      return; // 필수 요소가 없으면 초기화를 건너뚠
+    }
+    
+    try {
+      CalendarDebugger.log('캠린더 설정 함수 호출');
+      window.calendarApp = setupCalendar();
+      
+      CalendarDebugger.log('비동기 초기화 시작, 500ms 후 실행');
+      setTimeout(function() {
+        try {
+          // 요소가 여전히 존재하는지 다시 확인
+          if (document.getElementById('calendar-grid') && document.getElementById('month-year')) {
+            CalendarDebugger.log('초기화 함수 호출 시작');
+            window.calendarApp.init();
+            CalendarDebugger.log('달력 초기화 성공');
+          } else {
+            CalendarDebugger.log('초기화 시점에 캠린더 요소가 없습니다.', 'warning');
+          }
+        } catch (error) {
+          CalendarDebugger.log(`달력 초기화 중 오류 발생: ${error.message}`, 'error');
+          
+          // 요소가 여전히 존재하는지 확인 후 렌더링 시도
+          if (document.getElementById('calendar-grid') && document.getElementById('month-year')) {
+            CalendarDebugger.log('달력 강제 렌더링 시도');
+            try {
+              const today = new Date();
+              window.calendarApp.renderCalendar(today.getFullYear(), today.getMonth());
+              CalendarDebugger.log('달력 강제 렌더링 완료');
+            } catch (renderError) {
+              CalendarDebugger.log(`달력 강제 렌더링 시 오류: ${renderError.message}`, 'error');
+            }
+          } else {
+            CalendarDebugger.log('렌더링 시도 시점에 캠린더 요소가 없습니다.', 'warning');
+          }
+        }
+        
+        setTimeout(() => {
+          CalendarDebugger.printStatus();
+        }, 1000);
+      }, 500);
+      
+      // 로딩 표시기 숨기기
+      const loadingElement = document.getElementById('initial-loading');
+      if (loadingElement) {
+        loadingElement.style.display = 'none';
+        console.log('로딩 표시기 숨김');
+      }
+    } catch (error) {
+      CalendarDebugger.log(`캠린더 설정 중 오류 발생: ${error.message}`, 'error');
+      CalendarDebugger.printStatus();
+    }
+  });
+
+})(); // 즉시 실행 함수 끝

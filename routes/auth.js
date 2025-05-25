@@ -1,45 +1,140 @@
 const express = require('express');
 const router = express.Router();
-const { login, getCurrentUser, logout } = require('../controllers/authController');
-const { authenticateToken } = require('../config/jwt');
-const { saveToken } = require('../config/googleSheets');
 
-// 디버깅용 미들웨어
-router.use((req, res, next) => {
-  console.log(`Auth 라우트 요청: ${req.method} ${req.url}`);
-  next();
-});
+// 간단한 사용자 데이터베이스 (실제 프로젝트에서는 DB 사용)
+const users = [
+  {
+    id: 'M001',
+    name: '마스터',
+    role: 'master',
+    isAdmin: true
+  },
+  {
+    id: 'C001',
+    name: '신용기',
+    role: 'committee',
+    isAdmin: false
+  },
+  {
+    id: 'C002',
+    name: '문일지',
+    role: 'committee',
+    isAdmin: false
+  },
+  {
+    id: 'C003',
+    name: '김수연',
+    role: 'committee',
+    isAdmin: false
+  },
+  {
+    id: 'C004',
+    name: '이연숙',
+    role: 'committee',
+    isAdmin: false
+  },
+  {
+    id: 'C005',
+    name: '이정혜',
+    role: 'committee',
+    isAdmin: false
+  }
+];
 
-// 로그인
-router.post('/login', login);
-
-// 로그아웃
-router.post('/logout', logout);
-
-// 현재 로그인한 사용자 정보
-router.get('/current', authenticateToken, getCurrentUser);
-
-// 구글 OAuth 콜백 처리
-router.get('/google/callback', async (req, res) => {
+// 로그인 라우트 - 이름으로 로그인
+router.post('/login', (req, res) => {
   try {
-    const { code } = req.query;
+    console.log('로그인 요청 수신:', req.body);
     
-    if (!code) {
-      return res.status(400).send('인증 코드가 없습니다.');
+    // committeeName 또는 username 필드 사용
+    const loginName = req.body.committeeName || req.body.username || '';
+    
+    if (!loginName) {
+      console.log('로그인 이름이 제공되지 않았습니다.');
+      return res.status(400).json({
+        status: 'error',
+        message: '로그인 이름이 필요합니다.'
+      });
     }
     
-    // 토큰 저장
-    const success = await saveToken(code);
+    // 이름으로 사용자 찾기
+    const user = users.find(u => u.name === loginName);
     
-    if (success) {
-      return res.send('<h1>인증이 완료되었습니다</h1><p>이 창을 닫고 애플리케이션으로 돌아가세요.</p>');
+    if (user) {
+      // 세션에 위원 정보 저장
+      req.session.committee = user;
+      
+      console.log(`로그인 성공: ${user.name} (${user.role})`);
+      
+      res.json({
+        status: 'success',
+        message: '로그인 성공',
+        committee: user
+      });
     } else {
-      return res.status(500).send('토큰 저장 중 오류가 발생했습니다.');
+      console.log(`로그인 실패: 사용자 찾을 수 없음 - ${loginName}`);
+      res.status(401).json({
+        status: 'error',
+        message: '등록되지 않은 사용자입니다.'
+      });
     }
   } catch (error) {
-    console.error('구글 OAuth 콜백 처리 중 오류:', error);
-    return res.status(500).send('인증 처리 중 오류가 발생했습니다.');
+    console.error('로그인 처리 중 오류:', error);
+    res.status(500).json({
+      status: 'error',
+      message: '로그인 처리 중 서버 오류가 발생했습니다.'
+    });
   }
 });
 
-module.exports = router; 
+// 로그아웃 라우트
+router.get('/logout', (req, res) => {
+  req.session.destroy((err) => {
+    if (err) {
+      return res.status(500).json({
+        status: 'error',
+        message: '로그아웃 중 오류가 발생했습니다.'
+      });
+    }
+    
+    res.json({
+      status: 'success',
+      message: '로그아웃 성공'
+    });
+  });
+});
+
+// 인증 상태 확인 라우트
+router.get('/status', (req, res) => {
+  if (req.session && req.session.committee) {
+    res.json({
+      status: 'success',
+      isAuthenticated: true,
+      committee: req.session.committee
+    });
+  } else {
+    res.json({
+      status: 'success',
+      isAuthenticated: false
+    });
+  }
+});
+
+// 현재 인증된 사용자 정보 확인 라우트 (클라이언트 측에서 /auth/current로 호출)
+router.get('/current', (req, res) => {
+  if (req.session && req.session.committee) {
+    res.json({
+      status: 'success',
+      isAuthenticated: true,
+      committee: req.session.committee
+    });
+  } else {
+    res.json({
+      status: 'success',
+      isAuthenticated: false,
+      message: '인증된 사용자가 없습니다.'
+    });
+  }
+});
+
+module.exports = router;

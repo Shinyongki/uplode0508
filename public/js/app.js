@@ -165,7 +165,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (isLoginPage) {
     console.log('** 로그인 화면 감지 - 자동 API 호출 생략 **');
     // 로그인 화면일 때는 자동 API 호출을 하지 않음
-    updateAuthUI(false);
+    if (typeof window.updateAuthUI === 'function') {
+      window.updateAuthUI(false);
+    } else if (typeof updateAuthUI === 'function') {
+      updateAuthUI(false);
+    } else {
+      console.error('updateAuthUI 함수를 찾을 수 없습니다.');
+    }
     
     // organization.js에서 자동 실행될 수 있는 함수 방지
     window.skipInitialApiCalls = true;
@@ -211,12 +217,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.addEventListener('auth:token-ready', (event) => {
     console.log('토큰 준비 이벤트 감지:', event.detail);
     
-    // 로그인 페이지가 아니고, 일반 위원 계정인 경우에만 기관 목록 다시 로드
+    // 로그인 페이지가 아닌 경우에만 이벤트 처리
     if (!isLoginPage) {
       const currentUser = getCurrentUser();
-      if (currentUser && currentUser.role !== 'master') {
-        console.log('토큰 준비 후 기관 목록 로드 트리거');
-        loadOrganizations();
+      if (currentUser) {
+        // 토큰이 준비되었다는 것만 기록하고 추가 액션은 취하지 않음
+        console.log('토큰 준비 완료 - 사용자:', currentUser.name);
       }
     }
   });
@@ -364,24 +370,33 @@ const setupLoginForm = () => {
       
       try {
         console.log(`로그인 시도: ${committeeName}`);
-        const response = await login(committeeName);
         
-        if (response.status === 'success') {
-          // 로그인 성공 후 UI 업데이트
-          updateUIAfterLogin();
+        // window.login 함수 사용 (auth.js에서 노출된 전역 함수)
+        if (typeof window.login === 'function') {
+          const response = await window.login(committeeName);
           
-          // 현재 사용자 정보 확인
-          const currentUser = getCurrentUser();
-          
-          // 마스터 관리자인 경우 마스터 대시보드 표시
-          if (currentUser && currentUser.role === 'master') {
-            initiateMasterDashboard();
+          if (response.status === 'success') {
+            // 로그인 성공 후 UI 업데이트
+            updateUIAfterLogin();
+            
+            // 현재 사용자 정보 확인
+            const currentUser = window.getCurrentUser ? window.getCurrentUser() : null;
+            
+            // 마스터 관리자인 경우 마스터 대시보드 표시
+            if (currentUser && currentUser.role === 'master') {
+              initiateMasterDashboard();
+            } else {
+              // 일반 모니터링 위원인 경우 담당 기관 목록 표시
+              if (typeof loadOrganizations === 'function') {
+                loadOrganizations();
+              }
+            }
           } else {
-            // 일반 모니터링 위원인 경우 담당 기관 목록 표시
-            loadOrganizations();
+            alert(response.message || '로그인에 실패했습니다. 이름을 다시 확인해주세요.');
           }
         } else {
-          alert(response.message || '로그인에 실패했습니다. 이름을 다시 확인해주세요.');
+          console.error('login 함수를 찾을 수 없습니다. auth.js가 제대로 로드되었는지 확인하세요.');
+          alert('로그인 처리를 위한 함수를 찾을 수 없습니다. 페이지를 새로고침하고 다시 시도해주세요.');
         }
       } catch (error) {
         console.error('로그인 처리 중 오류 발생:', error);
@@ -398,7 +413,14 @@ const setupEventListeners = () => {
   if (logoutBtn) {
     logoutBtn.addEventListener('click', async () => {
       try {
-        await logout(); // 비동기 로그아웃 함수 호출 및 완료 대기
+        // window.logout 함수 사용 (auth.js에서 노출된 전역 함수)
+        if (typeof window.logout === 'function') {
+          await window.logout(); // 비동기 로그아웃 함수 호출 및 완료 대기
+        } else {
+          console.error('logout 함수를 찾을 수 없습니다.');
+          // 함수가 없어도 UI를 로그아웃 상태로 업데이트
+          updateUIAfterLogout();
+        }
       } catch (error) {
         console.error('로그아웃 처리 중 오류 발생:', error);
         alert('로그아웃 중 오류가 발생했습니다.');
@@ -413,7 +435,7 @@ const setupEventListeners = () => {
   if (backToOrgsBtn) {
     backToOrgsBtn.addEventListener('click', () => {
       // 마스터 관리자일 경우 마스터 대시보드로 돌아가기
-      if (isMaster()) {
+      if (typeof window.isMaster === 'function' && window.isMaster()) {
         initiateMasterDashboard();
       } else {
         // 일반 사용자일 경우 기관 선택 화면으로 돌아가기

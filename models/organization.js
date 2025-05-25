@@ -1,8 +1,9 @@
 const { readSheetData, writeSheetData } = require('../config/googleSheets');
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+// 환경 변수에서 스프레드시트 ID 가져오기, 없으면 하드코딩된 값 사용
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '11eWVWRY2cTU5nat3zsTSTjvhvk-LxhistC1LmfBNvPU';
 
 // 기관 목록을 위한 시트 범위
-const ORGANIZATIONS_RANGE = '기관_목록!A:E'; // 기관ID, 기관코드, 기관명, 지역, 기타정보
+const ORGANIZATIONS_RANGE = '기관_목록!A:F'; // 기관ID, 기관코드, 기관명, 지역, 주소, 연락처
 
 // 모든 기관 목록 가져오기
 const getAllOrganizations = async () => {

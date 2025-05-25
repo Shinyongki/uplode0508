@@ -7,6 +7,8 @@
   <!-- 중요 스타일은 빠르게 로드 -->
   <link rel="stylesheet" href="/css/styles.css">
   <link rel="stylesheet" href="/css/calendar.css">
+  <link rel="stylesheet" href="/css/calendar-additions.css">
+  <link rel="stylesheet" href="/css/modal-fix.css">
   <!-- 폰트 어썸은 지연 로드로 변경 -->
   <link rel="preload" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
   <noscript><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></noscript>
@@ -169,10 +171,27 @@
     </div>
   </div>
 
+  <!-- 로딩 표시기를 직접 숨기는 즉시 실행 스크립트 -->
+  <script>
+    // 5초 후에 로딩 표시기를 자동으로 숨김
+    window.addEventListener('DOMContentLoaded', function() {
+      console.log('페이지 로드 시작 - 로딩 표시기 자동 숨김 타이머 설정');
+      setTimeout(function() {
+        var loadingElement = document.getElementById('initial-loading');
+        if (loadingElement) {
+          console.log('타임아웃 후 로딩 표시기 숨김');
+          loadingElement.style.display = 'none';
+        }
+      }, 5000); // 5초
+    });
+  </script>
+  
   <!-- 스크립트 - 지연 로드로 변경 -->
   <script src="/js/api.js" defer></script>
   <script src="/js/common.js" defer></script>
+  <script src="/js/auth.js" defer></script>
   <script src="/js/calendar.js" defer></script>
+  <!-- calendar-fix.js 참조 제거 - 모든 기능이 calendar.js에 통합됨 -->
   <script>
     // 이전으로 버튼 처리 함수
     document.addEventListener('DOMContentLoaded', function() {
@@ -184,31 +203,48 @@
         const currentUserEl = document.getElementById('current-user');
         const isUserName = currentUserEl && currentUserEl.textContent !== '사용자';
         
-        // 로컬 스토리지에서 사용자 역할 확인 시도
+        // 로컬 스토리지에서 사용자 정보 확인 시도
         let userRole = 'committee'; // 기본값: 위원
+        let userName = '';
+        let committeeId = '';
+        
         try {
+          // userData에서 역할 확인
           const userData = JSON.parse(localStorage.getItem('userData'));
-          if (userData && userData.role) {
-            userRole = userData.role;
+          if (userData) {
+            if (userData.role) userRole = userData.role;
+            if (userData.name) userName = userData.name;
+            if (userData.id) committeeId = userData.id;
+          }
+          
+          // currentCommittee에서도 정보 확인 (더 상세한 정보가 있을 수 있음)
+          const committeeData = JSON.parse(localStorage.getItem('currentCommittee'));
+          if (committeeData) {
+            if (!userName && committeeData.name) userName = committeeData.name;
+            if (!committeeId && committeeData.id) committeeId = committeeData.id;
           }
         } catch (e) {
           console.warn('사용자 데이터 파싱 오류:', e);
         }
         
-        console.log('이전으로 버튼 클릭:', userRole);
+        console.log('이전으로 버튼 클릭:', { 역할: userRole, 이름: userName, ID: committeeId });
         
         // 로그인 우회를 위한 플래그 설정
         localStorage.setItem('forceDashboard', 'true');
         
-        // 사용자 역할에 따라 다른 페이지로 이동
-        if (userRole === 'master' || userRole === 'admin') {
-          // 마스터/관리자인 경우 메인 대시보드로 이동
-          window.location.href = '/';
-        } else {
-          // 일반 위원인 경우 위원 대시보드로 이동
-          // 현재는 일반 위원과 관리자 모두 동일한 index.html을 사용하므로 동일하게 설정
-          window.location.href = '/';
-        }
+        // 사용자 역할에 상관없이 일반 위원 첫 화면으로 이동
+        console.log('위원 첫 화면으로 이동합니다.');
+        
+        // 위원 대시보드로 이동
+        window.location.href = '/dashboard';
+        
+        // 만약 대시보드가 없는 경우 홈페이지로 이동
+        // setTimeout을 사용하여 리다이렉트가 실패하는 경우 대비
+        setTimeout(function() {
+          if (window.location.pathname.includes('/calendar')) {
+            window.location.href = '/';
+          }
+        }, 1000);
       });
       
       // 로그아웃 버튼 클릭 이벤트 처리
@@ -219,23 +255,11 @@
           
           // 로컬 스토리지 정리
           localStorage.removeItem('currentCommittee');
+          localStorage.removeItem('authToken');
           localStorage.removeItem('userData');
-          localStorage.removeItem('forceDashboard');
           
-          // 토큰 관련 저장소 정리
-          if (localStorage.getItem('authToken')) {
-            localStorage.removeItem('authToken');
-          }
-          
-          if (sessionStorage.getItem('authToken')) {
-            sessionStorage.removeItem('authToken');
-          }
-          
-          // 쿠키 정리 시도
-          document.cookie = 'connect.sid=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;';
-          document.cookie = 'authToken=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;';
-          
-          // 로그인 페이지로 이동 
+          // 로그아웃 처리
+          console.log('로그아웃 요청');
           window.location.href = '/login';
         });
       }

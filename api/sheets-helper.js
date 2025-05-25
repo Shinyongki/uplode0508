@@ -149,22 +149,110 @@ async function getSheetsClient() {
 
 /**
  * 시트 데이터 읽기
+ * @param {string} spreadsheetId - 스프레드시트 ID
  * @param {string} range - 읽을 범위 (예: 'Sheet1!A1:B10')
  * @returns {Promise<Array<Array<string>>>} 시트 데이터
  */
-async function readSheetData(range) {
+async function readSheetData(spreadsheetId, range) {
   try {
-    if (!SPREADSHEET_ID) {
-      throw new Error('SPREADSHEET_ID environment variable is not set');
+    // spreadsheetId가 제공되지 않으면 환경 변수 사용
+    const sheetId = spreadsheetId || SPREADSHEET_ID;
+    
+    if (!sheetId) {
+      throw new Error('스프레드시트 ID가 제공되지 않았고 환경 변수도 설정되지 않았습니다');
     }
     
-    const sheets = await getSheetsClient();
-    const response = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range,
-    });
+    // 시트 이름과 범위 분리
+    let sheetName = '';
+    let rangeSpec = range;
     
-    return response.data.values || [];
+    if (range.includes('!')) {
+      const parts = range.split('!');
+      sheetName = parts[0];
+      rangeSpec = parts[1];
+      
+      // 시트 이름 특수문자 처리
+      if (sheetName.includes(' ') || /[^a-zA-Z0-9_]/.test(sheetName)) {
+        // 이미 따옴표가 있는지 확인
+        if (!(sheetName.startsWith('\'') && sheetName.endsWith('\'')) && 
+            !(sheetName.startsWith('"') && sheetName.endsWith('"'))) {
+          // 따옴표 추가
+          sheetName = `'${sheetName}'`;
+        }
+      }
+      
+      // 새 범위 재조합
+      range = `${sheetName}!${rangeSpec}`;
+    }
+    
+    console.log(`[sheets-helper] 시트 데이터 읽기 시도 - 스프레드시트 ID: ${sheetId}, 범위: ${range}`);
+    
+    try {
+      const sheets = await getSheetsClient();
+      const response = await sheets.spreadsheets.values.get({
+        spreadsheetId: sheetId,
+        range,
+      });
+      
+      console.log(`[sheets-helper] 시트 데이터 로드 성공 - 행 개수: ${response.data.values ? response.data.values.length : 0}`);
+      return response.data.values || [];
+    } catch (error) {
+      // 시트 이름에 문제가 있는 경우 다른 방식 시도
+      if (sheetName && error.message.includes('Unable to parse range')) {
+        console.log(`[sheets-helper] 시트 이름 형식 문제, 다른 방식 시도`);
+        
+        // 시도 1: URL 인코딩 사용
+        try {
+          const encodedSheetName = encodeURIComponent(sheetName.replace(/['"]*/g, ''));
+          const newRange = `${encodedSheetName}!${rangeSpec}`;
+          console.log(`[sheets-helper] URL 인코딩 시도: ${newRange}`);
+          
+          const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: sheetId,
+            range: newRange,
+          });
+          
+          console.log(`[sheets-helper] URL 인코딩 방식 성공 - 행 개수: ${response.data.values ? response.data.values.length : 0}`);
+          return response.data.values || [];
+        } catch (error2) {
+          console.error(`[sheets-helper] URL 인코딩 방식 실패:`, error2.message);
+          
+          // 시도 2: 시트 ID로 접근
+          try {
+            // 시트 목록 가져오기
+            const sheetsInfo = await sheets.spreadsheets.get({
+              spreadsheetId: sheetId,
+            });
+            
+            // 시트 이름으로 시트 ID 찾기
+            const targetSheet = sheetsInfo.data.sheets.find(sheet => 
+              sheet.properties.title.replace(/['"]*/g, '') === sheetName.replace(/['"]*/g, ''));
+            
+            if (targetSheet) {
+              const sheetId = targetSheet.properties.sheetId;
+              console.log(`[sheets-helper] 시트 ID 찾음: ${sheetId} (시트명: ${targetSheet.properties.title})`);
+              
+              // 시트 ID로 데이터 가져오기
+              const gridRange = rangeSpec.split(':');
+              const response = await sheets.spreadsheets.values.get({
+                spreadsheetId: sheetId,
+                range: `${targetSheet.properties.title}!${rangeSpec}`,
+              });
+              
+              console.log(`[sheets-helper] 시트 ID 방식 성공 - 행 개수: ${response.data.values ? response.data.values.length : 0}`);
+              return response.data.values || [];
+            } else {
+              throw new Error(`시트 이름 '${sheetName}'을 찾을 수 없습니다.`);
+            }
+          } catch (error3) {
+            console.error(`[sheets-helper] 시트 ID 방식 실패:`, error3.message);
+            throw error3;
+          }
+        }
+      } else {
+        throw error;
+      }
+    }
   } catch (error) {
     console.error(`[sheets-helper] Error reading sheet data from range ${range}:`, error.message);
     throw error;
@@ -194,6 +282,81 @@ async function writeSheetData(range, values) {
     return response.data;
   } catch (error) {
     console.error(`[sheets-helper] Error writing sheet data to range ${range}:`, error.message);
+    throw error;
+  }
+}
+
+/**
+ * 구글 시트에서 행 삭제
+ * @param {string} sheetName - 시트 이름 (예: 'Sheet1' 또는 '일정_관리')
+ * @param {number} rowIndex - 삭제할 행 번호 (1부터 시작, 헤더 행도 포함)
+ * @returns {Promise<object>} 응답 객체
+ */
+async function deleteRow(sheetName, rowIndex) {
+  try {
+    if (!SPREADSHEET_ID) {
+      throw new Error('SPREADSHEET_ID environment variable is not set');
+    }
+    
+    // Google Sheets API를 사용하여 행 삭제 처리
+    // 방법 1: 해당 행을 빈 값으로 대체
+    try {
+      console.log(`[sheets-helper] 행 삭제 시도 - 시트: ${sheetName}, 행: ${rowIndex}`);
+      
+      // 시트 행 너비 확인
+      const sheets = await getSheetsClient();
+      const sheetInfo = await sheets.spreadsheets.get({
+        spreadsheetId: SPREADSHEET_ID,
+        ranges: [sheetName],
+        includeGridData: false
+      });
+      
+      // 시트 ID 가져오기
+      const sheet = sheetInfo.data.sheets[0];
+      const sheetId = sheet.properties.sheetId;
+      
+      // 삭제 요청 (batchUpdate 사용)
+      const response = await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SPREADSHEET_ID,
+        resource: {
+          requests: [
+            {
+              deleteDimension: {
+                range: {
+                  sheetId: sheetId,
+                  dimension: 'ROWS',
+                  startIndex: rowIndex - 1, // API는 0부터 시작하지만 rowIndex는 1부터 시작하민로 -1
+                  endIndex: rowIndex // 끝 인덱스는 포함되지 않음
+                }
+              }
+            }
+          ]
+        }
+      });
+      
+      console.log(`[sheets-helper] 행 삭제 성공 - 시트: ${sheetName}, 행: ${rowIndex}`);
+      return response.data;
+    } catch (deleteError) {
+      console.error(`[sheets-helper] 행 삭제 오류:`, deleteError.message);
+      
+      // 실패하면 대체 전략: 해당 행을 빈 데이터로 대체
+      console.log(`[sheets-helper] 행 삭제 실패, 빈 데이터로 상태 변경 시도`);
+      
+      // 총 열 수 확인 (API에서 첫 행 가져오기)
+      const headerData = await readSheetData(SPREADSHEET_ID, `${sheetName}!1:1`);
+      const columnCount = headerData[0].length;
+      
+      // 빈 데이터 생성
+      const emptyRow = new Array(columnCount).fill('');
+      
+      // 빈 데이터로 업데이트
+      const response = await writeSheetData(`${sheetName}!A${rowIndex}:${String.fromCharCode(65 + columnCount - 1)}${rowIndex}`, [emptyRow]);
+      
+      console.log(`[sheets-helper] 행 비우기 성공 - 시트: ${sheetName}, 행: ${rowIndex}`);
+      return response;
+    }
+  } catch (error) {
+    console.error(`[sheets-helper] 행 삭제 중 오류:`, error.message);
     throw error;
   }
 }
@@ -233,5 +396,6 @@ module.exports = {
   getSheetsClient,
   readSheetData,
   writeSheetData,
+  deleteRow,
   getFallbackData
 }; 

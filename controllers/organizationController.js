@@ -1,5 +1,5 @@
 const { readSheetData, appendToSheet, writeToSheet } = require('../config/googleSheets');
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '11eWVWRY2cTU5nat3zsTSTjvhvk-LxhistC1LmfBNvPU';
 const Organization = require('../models/organization');
 
 // 모든 수행기관 목록 가져오기
@@ -40,15 +40,24 @@ const getAllOrganizations = async (req, res) => {
     });
   } catch (error) {
     console.error('모든 기관 조회 오류:', error);
+    console.error('[에러 상세 정보]:', JSON.stringify(error) || '상세 정보 없음');
+    
+    // 에러 객체가 undefined인 경우에도 처리
+    const errorObj = error || { message: '알 수 없는 오류' };
     
     // 클라이언트에 전송할 오류 메시지
     let errorMessage = '서버 오류가 발생했습니다.';
     
     // 세부 오류 정보 (개발 환경에서만 제공)
     if (process.env.NODE_ENV === 'development') {
-      errorMessage += ` 세부 정보: ${error.message}`;
-      console.error('스택 트레이스:', error.stack);
+      errorMessage += ` 세부 정보: ${errorObj.message || '정보 없음'}`;
+      if (errorObj.stack) {
+        console.error('스택 트레이스:', errorObj.stack);
+      }
     }
+    
+    // 로그에 조직 목록 조회 실패 기록
+    console.error('[ERROR] 조직 목록 조회 실패:', errorObj.message || '정의되지 않은 에러');
     
     return res.status(500).json({
       status: 'error',
@@ -326,7 +335,7 @@ const addOrganization = async (req, res) => {
     }
     
     // 기존 데이터 불러오기
-    const sheetRange = '수행기관!A:F';
+    const sheetRange = '기관_목록!A:F';
     const data = await readSheetData(SPREADSHEET_ID, sheetRange);
     
     if (!data || data.length === 0) {
@@ -352,7 +361,7 @@ const addOrganization = async (req, res) => {
     const newOrg = [newOrgId.toString(), code, name, region, new Date().toISOString(), note || ''];
     
     // 구글 시트에 추가
-    await appendToSheet(SPREADSHEET_ID, '수행기관!A:F', [newOrg]);
+    await appendToSheet(SPREADSHEET_ID, '기관_목록!A:F', [newOrg]);
     
     return res.status(201).json({
       status: 'success',
@@ -398,7 +407,7 @@ const deleteOrganization = async (req, res) => {
     }
     
     // 기존 데이터 불러오기
-    const sheetRange = '수행기관!A:E';
+    const sheetRange = '기관_목록!A:E';
     const data = await readSheetData(SPREADSHEET_ID, sheetRange);
     
     if (!data || data.length <= 1) { // 헤더만 있는 경우
@@ -426,7 +435,7 @@ const deleteOrganization = async (req, res) => {
     const deletedOrg = rows.splice(orgIndex, 1)[0];
     
     // 시트 전체 데이터 업데이트 (헤더 + 남은 데이터)
-    await writeToSheet(SPREADSHEET_ID, '수행기관!A:E', [headers, ...rows]);
+    await writeToSheet(SPREADSHEET_ID, '기관_목록!A:E', [headers, ...rows]);
     
     return res.status(200).json({
       status: 'success',

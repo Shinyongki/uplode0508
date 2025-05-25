@@ -4,7 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>노인맞춤돌봄서비스 상시모니터링 시스템</title>
+  <!-- CSS 파일 로드 -->
   <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/schedule-manager.css">
   <!-- Tailwind CSS CDN -->
   <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
   <!-- Google Fonts - Noto Sans KR -->
@@ -85,7 +87,15 @@
             </div>
           </div>
           
-          <h2 class="text-lg font-semibold mb-4">담당 기관 목록</h2>
+          <div class="flex justify-between items-center mb-4">
+            <h2 class="text-lg font-semibold">담당 기관 목록</h2>
+            <button id="refresh-data-btn" class="px-3 py-1 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition flex items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              데이터 새로고침
+            </button>
+          </div>
           <div>
             <h3 class="text-md font-medium mb-2">주담당 기관</h3>
             <div id="main-organizations" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
@@ -354,14 +364,16 @@
       }
     });
   </script>
-  <script src="js/api.js"></script>
-  <script src="js/common.js"></script>
-  <script src="js/auth.js"></script>
-  <script src="js/committeeSchedule.js"></script>
-  <script src="js/master.js"></script>
-  <script src="js/organization.js"></script>
-  <script src="js/indicator.js"></script>
-  <script src="js/app.js"></script>
+  <script src="/js/organizations-data.js"></script>
+  <script src="/js/calendar.js"></script>
+  <script src="/js/schedule-manager.js"></script>
+  <script src="/js/common.js"></script>
+  <script src="/js/auth.js"></script>
+  <script src="/js/committeeSchedule.js"></script>
+  <script src="/js/master.js"></script>
+  <script src="/js/organization.js"></script>
+  <script src="/js/indicator.js"></script>
+  <script src="/js/app.js"></script>
   
   <!-- 명시적으로 모든 스크립트가 로드된 후 초기화 로직을 실행하는 스크립트 -->
   <script>

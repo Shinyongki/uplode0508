@@ -8,8 +8,10 @@ const committeesAllHandler = require('./committees-all');
 const committeesMatchingHandler = require('./committees-matching');
 const organizationsHandler = require('./organizations');
 const schedulesHandler = require('./schedules');
+const schedulesDeleteHandler = require('./schedules-delete');
 const debugEnvHandler = require('./debug-env');
 const resultsMeHandler = require('./results-me');
+const indicatorsHandler = require('./indicators');
 
 // 캐싱 및 동기화 모듈
 const cacheManager = require('./cache-manager');
@@ -24,7 +26,9 @@ router.get('/results-me', resultsMeHandler);
 router.get('/results/me', resultsMeHandler);
 router.get('/organizations', organizationsHandler);
 router.get('/schedules', schedulesHandler);
+router.delete('/schedules/:id', schedulesDeleteHandler); // 일정 삭제 요청 처리
 router.get('/debug-env', debugEnvHandler);
+router.get('/indicators', indicatorsHandler); // 지표 API 추가
 
 // 기본 API 상태 체크 라우트
 router.get('/', (req, res) => {
