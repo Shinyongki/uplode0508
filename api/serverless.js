@@ -72,9 +72,10 @@ const committeeOrgData = [
 app.get('/api/sheets/organizations', (req, res) => {
   try {
     console.log('위원별 담당기관 API 호출됨');
+    // 클라이언트가 기대하는 형식으로 데이터 반환
     res.status(200).json({
       status: 'success',
-      data: committeeOrgData
+      values: committeeOrgData
     });
   } catch (error) {
     console.error('위원별 담당기관 API 오류:', error);
@@ -106,11 +107,10 @@ app.get('/api/committees/matching', (req, res) => {
       };
     });
     
+    // 클라이언트가 기대하는 형식으로 데이터 반환
     res.status(200).json({
       status: 'success',
-      data: {
-        matchings: matchings
-      }
+      matchings: matchings // 직접 matchings 배열 반환
     });
   } catch (error) {
     console.error('위원별 담당기관 매칭 API 오류:', error);
@@ -149,9 +149,10 @@ app.get('/api/organizations', (req, res) => {
       }
     }
     
+    // 클라이언트가 기대하는 형식으로 데이터 반환
     res.status(200).json({
       status: 'success',
-      data: uniqueOrgs
+      organizations: uniqueOrgs // 직접 organizations 배열 반환
     });
   } catch (error) {
     console.error('기관 목록 API 오류:', error);
@@ -233,10 +234,39 @@ app.use((req, res) => {
   });
 });
 
+// 정적 파일 서빙 설정 (index.html 및 기타 정적 파일)
+app.use(express.static(path.join(__dirname, '../public')));
+
+// 루트 경로에 대한 처리 (index.html 서빙)
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, '../index.html'));
+});
+
+// 기타 모든 경로에 대한 처리 (SPA 지원)
+app.get('*', (req, res, next) => {
+  // API 요청이나 정적 파일 요청이 아닌 경우 index.html 서빙
+  if (!req.path.startsWith('/api/') && !req.path.startsWith('/auth/')) {
+    res.sendFile(path.join(__dirname, '../index.html'));
+  } else {
+    next();
+  }
+});
+
 // Vercel 서버리스 함수 핸들러
 module.exports = (req, res) => {
   // 요청 로깅
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  
+  // CORS 헤더 수동 설정 (필요한 경우)
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, PATCH, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With,content-type,Authorization');
+  
+  // OPTIONS 요청에 대한 사전 처리
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
   
   // Express 앱으로 요청 전달
   return app(req, res);
