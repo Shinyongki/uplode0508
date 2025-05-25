@@ -6,6 +6,7 @@ const cors = require('cors');
 const session = require('express-session');
 const flash = require('connect-flash');
 const morgan = require('morgan');
+const fs = require('fs');
 const { google } = require('googleapis');
 
 // 라우트 가져오기
@@ -19,14 +20,34 @@ const PORT = process.env.PORT || 3000;
 // 환경 변수 설정 (기존 환경 변수가 없는 경우에만 설정)
 process.env.USE_SERVICE_ACCOUNT = process.env.USE_SERVICE_ACCOUNT || 'true';
 
-// 구글시트 인증 설정
-const authGoogle = new google.auth.GoogleAuth({
-  keyFile: path.join(__dirname, 'service-account.json'),
-  scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-});
+// Vercel 환경에서 서비스 계정 키 처리
+let authGoogle;
+let sheets;
 
-// 구글시트 API 클라이언트 생성
-const sheets = google.sheets({ version: 'v4', auth: authGoogle });
+try {
+  // 환경 변수에서 서비스 계정 키를 가져와 파일로 저장 (Vercel 환경용)
+  if (process.env.SERVICE_ACCOUNT_KEY) {
+    console.log('환경 변수에서 서비스 계정 키를 가져옵니다.');
+    const serviceAccountPath = path.join(__dirname, 'service-account.json');
+    fs.writeFileSync(serviceAccountPath, process.env.SERVICE_ACCOUNT_KEY);
+    process.env.SERVICE_ACCOUNT_KEY_PATH = serviceAccountPath;
+    console.log('서비스 계정 키 파일이 생성되었습니다:', serviceAccountPath);
+  } else {
+    console.log('환경 변수에 서비스 계정 키가 없습니다. 파일 시스템에서 찾습니다.');
+  }
+
+  // 구글시트 인증 설정
+  authGoogle = new google.auth.GoogleAuth({
+    keyFile: path.join(__dirname, 'service-account.json'),
+    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+  });
+
+  // 구글시트 API 클라이언트 생성
+  sheets = google.sheets({ version: 'v4', auth: authGoogle });
+  console.log('Google Sheets API 클라이언트가 성공적으로 초기화되었습니다.');
+} catch (error) {
+  console.error('Google Sheets API 초기화 중 오류 발생:', error);
+}
 
 // 기본 미들웨어 설정
 app.use(cors({
@@ -36,7 +57,10 @@ app.use(cors({
     const allowedOrigins = [
       'http://localhost:3000',
       'https://upload0414.vercel.app',
-      'https://upload0414-git-master.vercel.app'
+      'https://upload0414-git-master.vercel.app',
+      'https://uplode0508.vercel.app',
+      'https://uplode0508-git-main.vercel.app',
+      'https://committee-monitoring-system.vercel.app'
     ];
     
     // origin이 undefined인 경우(예: 서버-서버 요청)나 허용된 도메인인 경우 허용
